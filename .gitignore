@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Runtime state & logs
+*.log
+state*.json
+rsi_paused.json
+assets_rsi.json
+
+# Trade history (sensitive)
+trades*.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual env
+venv/
+.venv/
