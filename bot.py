@@ -96,6 +96,33 @@ def append_trade_log(row: dict) -> None:
         w.writerow(row)
 
 
+def read_trade_stats(mode_filter: str) -> dict:
+    """Returns {strategy: {wins, losses, pnl}} filtered by mode (LIVE/PAPER)."""
+    stats: dict = {}
+    if not TRADE_LOG.exists():
+        return stats
+    with open(TRADE_LOG, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("mode", "").upper() != mode_filter.upper():
+                continue
+            strat = row.get("strategy", "?")
+            if strat not in stats:
+                stats[strat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            result = row.get("result", "")
+            try:
+                pnl = float(result.split()[-1].replace("$", ""))
+            except Exception:
+                pnl = 0.0
+            if "WIN" in result:
+                stats[strat]["wins"] += 1
+            else:
+                stats[strat]["losses"] += 1
+            stats[strat]["pnl"] += pnl
+    for s in stats:
+        stats[s]["pnl"] = round(stats[s]["pnl"], 2)
+    return stats
+
+
 # ── Telegram helpers ──────────────────────────────────────────────────────────
 
 def _sar_signal_text(sig: dict) -> str:
@@ -252,7 +279,12 @@ async def on_position_closed(
     tp = float(pos.get("take", 0))
 
     result = "WIN" if close_reason == "TP" else "LOSS"
-    pnl = round(MARGIN * 2, 2) if result == "WIN" else -MARGIN
+    qty = float(pos.get("quantity", 1))
+    exit_price = tp if close_reason == "TP" else sl
+    if direction == "LONG":
+        pnl = round((exit_price - entry) * qty, 2)
+    else:
+        pnl = round((entry - exit_price) * qty, 2)
 
     log.info("[%s][%s] closed via %s | %s entry=%.5f pnl=%+.2f",
              "PAPER" if paper else "LIVE", strategy_name, close_reason, direction, entry, pnl)
@@ -439,10 +471,14 @@ async def ema_tick(app: Application, state: dict) -> None:
             candles = await bingx.get_klines(SOL_SYMBOL, EMA_TF, 10)
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
-            close_reason = None if not await is_position_closed(SOL_SYMBOL) else "SL or TP"
+            if await is_position_closed(SOL_SYMBOL):
+                candles = await bingx.get_klines(SOL_SYMBOL, EMA_TF, 10)
+                close_reason = paper_check_closed(pos, candles[:-1]) or "CLOSED"
+            else:
+                close_reason = None
 
         if close_reason:
-            await on_position_closed(app, state, STATE_EMA, close_reason, "EMA", SOL_SYMBOL, sl_cooldown=SL_COOLDOWN)
+            await on_position_closed(app, state, STATE_EMA, close_reason, "EMA", SOL_SYMBOL, paper=PAPER_MODE, sl_cooldown=SL_COOLDOWN)
 
 
 # ── Callback handler (routes by prefix) ──────────────────────────────────────
@@ -528,7 +564,8 @@ async def _handle_approval(
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = ["📊 *Bot Status*\n"]
     sar_mode = "📝 PAPER" if SAR_PAPER_MODE else "🔴 LIVE"
-    lines.append(f"SAR: {sar_mode}  |  EMA/RSI: 📝 PAPER\n")
+    ema_mode = "📝 PAPER" if PAPER_MODE else "🔴 LIVE"
+    lines.append(f"SAR: {sar_mode}  |  EMA: {ema_mode}\n")
 
     # ── SAR + EMA ─────────────────────────────────────────────────────────────
     strategies = [
@@ -605,6 +642,30 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lines.append(f"TP:     `{tp:.5f}`")
             lines.append(f"PnL:    {pnl_emoji} `{pnl_usd:+.2f}$` ({pnl_pct*100:+.2f}%)")
             lines.append(f"TP progress: `{progress}%`")
+
+    # ── Statistics ────────────────────────────────────────────────────────────
+    lines.append("\n━━━━━━━━━━━━━━━")
+    lines.append("📈 *LIVE статистика*")
+    live = read_trade_stats("LIVE")
+    if live:
+        for strat, s in live.items():
+            total = s["wins"] + s["losses"]
+            wr = round(s["wins"] / total * 100) if total else 0
+            pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
+            lines.append(f"{strat}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
+    else:
+        lines.append("Нет сделок")
+
+    lines.append("\n📋 *PAPER история*")
+    paper = read_trade_stats("PAPER")
+    if paper:
+        for strat, s in paper.items():
+            total = s["wins"] + s["losses"]
+            wr = round(s["wins"] / total * 100) if total else 0
+            pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
+            lines.append(f"{strat}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
+    else:
+        lines.append("Нет сделок")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
