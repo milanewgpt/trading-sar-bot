@@ -8,6 +8,7 @@ import asyncio
 import csv
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from config import (
     BINGX_API_KEY,
     BINGX_SECRET_KEY,
     CANDLES_LIMIT,
+    DATA_DIR,
     LEVERAGE,
     LOOP_INTERVAL,
     MARGIN,
@@ -35,10 +37,15 @@ from config import (
 from strategy import check_signal
 from strategy_ema import check_ema_signal, signal_details
 
+_log_handlers: list = [logging.StreamHandler()]
+# On Railway (DATA_DIR set): also write to persistent volume log file
+if os.getenv("DATA_DIR"):
+    _log_handlers.append(logging.FileHandler(Path(DATA_DIR) / "bot.log"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
+    handlers=_log_handlers,
 )
 log = logging.getLogger(__name__)
 
@@ -48,9 +55,11 @@ SOL_SYMBOL = "SOL-USDT"
 EMA_TF = "1h"
 EMA_CANDLES = 220  # need 100+ for EMA100 warmup
 
-STATE_SAR = Path("state_sar.json")
-STATE_EMA = Path("state_ema.json")
-TRADE_LOG = Path("trades.csv")
+_data = Path(DATA_DIR)
+_data.mkdir(parents=True, exist_ok=True)
+STATE_SAR = _data / "state_sar.json"
+STATE_EMA = _data / "state_ema.json"
+TRADE_LOG  = _data / "trades.csv"
 
 SL_COOLDOWN = 4 * 3600  # 4h cooldown after SL hit
 

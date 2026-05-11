@@ -29,3 +29,6 @@ PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
 
 # Per-strategy override: set SAR_PAPER_MODE=false to trade SAR live
 SAR_PAPER_MODE = os.getenv("SAR_PAPER_MODE", "false").lower() == "true"
+
+# Data directory for state files and trade log (use Railway volume mount path)
+DATA_DIR = os.path.abspath(os.getenv("DATA_DIR", "."))
