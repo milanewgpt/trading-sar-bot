@@ -245,6 +245,24 @@ async def is_position_closed(symbol: str) -> bool:
     return True
 
 
+async def get_live_close_reason(symbol: str, open_time: str) -> str:
+    """Query BingX order history to determine if position was closed by SL or TP."""
+    try:
+        start_ts = int(datetime.fromisoformat(open_time).timestamp() * 1000)
+        orders = await bingx.get_history_orders(symbol, start_ts=start_ts, limit=10)
+        for order in orders:
+            if order.get("status") != "FILLED":
+                continue
+            otype = order.get("type", "")
+            if otype == "TAKE_PROFIT_MARKET":
+                return "TP"
+            if otype == "STOP_MARKET":
+                return "SL"
+    except Exception as e:
+        log.warning("get_live_close_reason failed: %s", e)
+    return "CLOSED"
+
+
 def paper_check_closed(position: dict, candles: list) -> str | None:
     direction = position["direction"]
     sl = float(position["stop"])
@@ -400,8 +418,7 @@ async def sar_tick(app: Application, state: dict) -> None:
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
             if await is_position_closed(SYMBOL):
-                candles = await bingx.get_klines(SYMBOL, TF_ENTRY, 10)
-                close_reason = paper_check_closed(pos, candles[:-1]) or "CLOSED"
+                close_reason = await get_live_close_reason(SYMBOL, pos.get("open_time", ""))
             else:
                 close_reason = None
 
@@ -481,8 +498,7 @@ async def ema_tick(app: Application, state: dict) -> None:
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
             if await is_position_closed(SOL_SYMBOL):
-                candles = await bingx.get_klines(SOL_SYMBOL, EMA_TF, 10)
-                close_reason = paper_check_closed(pos, candles[:-1]) or "CLOSED"
+                close_reason = await get_live_close_reason(SOL_SYMBOL, pos.get("open_time", ""))
             else:
                 close_reason = None
 
