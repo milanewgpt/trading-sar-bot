@@ -797,6 +797,15 @@ async def close_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _manual_close(update, state, STATE_EMA, "EMA", SOL_SYMBOL, EMA_TF, paper=PAPER_MODE)
 
 
+async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not TRADE_LOG.exists():
+        await update.message.reply_text("trades.csv не найден.")
+        return
+    text = TRADE_LOG.read_text()
+    if len(text) > 4000:
+        text = text[-4000:]
+    await update.message.reply_text(f"```\n{text}\n```", parse_mode="Markdown")
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -804,6 +813,7 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("status",    status_command))
+    app.add_handler(CommandHandler("trades",    trades_command))
     app.add_handler(CommandHandler("stop_sar",  stop_sar_command))
     app.add_handler(CommandHandler("start_sar", start_sar_command))
     app.add_handler(CommandHandler("close_sar", close_sar_command))
