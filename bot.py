@@ -799,12 +799,15 @@ async def close_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not TRADE_LOG.exists():
-        await update.message.reply_text("trades.csv не найден.")
+        await update.message.reply_text(f"trades.csv не найден\nПуть: `{TRADE_LOG}`", parse_mode="Markdown")
         return
-    text = TRADE_LOG.read_text()
-    if len(text) > 4000:
-        text = text[-4000:]
-    await update.message.reply_text(f"```\n{text}\n```", parse_mode="Markdown")
+    text = TRADE_LOG.read_text().strip()
+    if not text:
+        await update.message.reply_text("trades.csv пуст.")
+        return
+    if len(text) > 3800:
+        text = text[-3800:]
+    await update.message.reply_text(f"`{TRADE_LOG}`\n```\n{text}\n```", parse_mode="Markdown")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -825,6 +828,7 @@ def main() -> None:
     async def on_startup(application: Application) -> None:
         await application.bot.set_my_commands([
             ("status",    "📊 Статус всех стратегий"),
+            ("trades",    "📋 Показать trades.csv"),
             ("stop_sar",  "⏸ Остановить SAR"),
             ("start_sar", "▶️ Запустить SAR"),
             ("close_sar", "🛑 Закрыть позицию SAR"),
