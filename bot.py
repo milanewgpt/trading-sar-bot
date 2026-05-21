@@ -670,7 +670,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── Statistics ────────────────────────────────────────────────────────────
     lines.append("\n━━━━━━━━━━━━━━━")
-    lines.append("📈 *LIVE статистика*")
+    lines.append("📈 *LIVE stats*")
     live = read_trade_stats("LIVE")
     if live:
         for strat, s in live.items():
@@ -679,9 +679,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
             lines.append(f"{strat}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
     else:
-        lines.append("Нет сделок")
+        lines.append("No trades yet")
 
-    lines.append("\n📋 *PAPER история*")
+    lines.append("\n📋 *PAPER history*")
     paper = read_trade_stats("PAPER")
     if paper:
         for strat, s in paper.items():
@@ -690,7 +690,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
             lines.append(f"{strat}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
     else:
-        lines.append("Нет сделок")
+        lines.append("No trades yet")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -709,7 +709,7 @@ async def _manual_close(
 ) -> bool:
     """Close open position manually. Returns True if position was closed."""
     if state.get("state") != POSITION_OPEN:
-        await update.message.reply_text(f"⚠️ {strategy_name}: нет открытой позиции.")
+        await update.message.reply_text(f"⚠️ {strategy_name}: no open position.")
         return False
 
     pos = state.get("position", {})
@@ -728,7 +728,7 @@ async def _manual_close(
             pos_side = "LONG" if direction == "long" else "SHORT"
             await bingx.place_market_order(symbol, close_side, pos_side, pos.get("quantity", 1))
         except Exception as e:
-            await update.message.reply_text(f"❌ BingX ошибка: {e}")
+            await update.message.reply_text(f"❌ BingX error: {e}")
             return False
 
     if direction == "long":
@@ -762,7 +762,7 @@ async def _manual_close(
 
     pnl_emoji = "✅" if pnl >= 0 else "❌"
     await update.message.reply_text(
-        f"🛑 *{strategy_name}* закрыта вручную\n"
+        f"🛑 *{strategy_name}* closed manually\n"
         f"_{('PAPER' if paper else 'LIVE')}_ | {direction.upper()} {symbol.replace('-', '')}\n"
         f"Entry: `{entry:.5f}` → `{current_price:.5f}`\n"
         f"PnL: {pnl_emoji} `{pnl:+.2f}$`",
@@ -777,14 +777,14 @@ async def stop_sar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     state = load_state(STATE_SAR)
     state["paused"] = True
     save_state(STATE_SAR, state)
-    await update.message.reply_text("⏸ SAR приостановлена.")
+    await update.message.reply_text("⏸ SAR paused.")
 
 
 async def start_sar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = load_state(STATE_SAR)
     state["paused"] = False
     save_state(STATE_SAR, state)
-    await update.message.reply_text("▶️ SAR запущена.")
+    await update.message.reply_text("▶️ SAR resumed.")
 
 
 async def close_sar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -798,14 +798,14 @@ async def stop_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     state = load_state(STATE_EMA)
     state["paused"] = True
     save_state(STATE_EMA, state)
-    await update.message.reply_text("⏸ EMA приостановлена.")
+    await update.message.reply_text("⏸ EMA paused.")
 
 
 async def start_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = load_state(STATE_EMA)
     state["paused"] = False
     save_state(STATE_EMA, state)
-    await update.message.reply_text("▶️ EMA запущена.")
+    await update.message.reply_text("▶️ EMA resumed.")
 
 
 async def close_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -815,11 +815,11 @@ async def close_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not TRADE_LOG.exists():
-        await update.message.reply_text(f"trades.csv не найден\nПуть: `{TRADE_LOG}`", parse_mode="Markdown")
+        await update.message.reply_text(f"trades.csv not found\nPath: `{TRADE_LOG}`", parse_mode="Markdown")
         return
     text = TRADE_LOG.read_text().strip()
     if not text:
-        await update.message.reply_text("trades.csv пуст.")
+        await update.message.reply_text("trades.csv is empty.")
         return
     if len(text) > 3800:
         text = text[-3800:]
@@ -843,14 +843,14 @@ def main() -> None:
 
     async def on_startup(application: Application) -> None:
         await application.bot.set_my_commands([
-            ("status",    "📊 Статус всех стратегий"),
-            ("trades",    "📋 Показать trades.csv"),
-            ("stop_sar",  "⏸ Остановить SAR"),
-            ("start_sar", "▶️ Запустить SAR"),
-            ("close_sar", "🛑 Закрыть позицию SAR"),
-            ("stop_ema",  "⏸ Остановить EMA"),
-            ("start_ema", "▶️ Запустить EMA"),
-            ("close_ema", "🛑 Закрыть позицию EMA"),
+            ("status",    "📊 Show all strategies status"),
+            ("trades",    "📋 Show trades.csv"),
+            ("stop_sar",  "⏸ Pause SAR strategy"),
+            ("start_sar", "▶️ Resume SAR strategy"),
+            ("close_sar", "🛑 Close SAR position manually"),
+            ("stop_ema",  "⏸ Pause EMA strategy"),
+            ("start_ema", "▶️ Resume EMA strategy"),
+            ("close_ema", "🛑 Close EMA position manually"),
         ])
         asyncio.create_task(sar_loop(application))
         asyncio.create_task(ema_loop(application))
