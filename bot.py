@@ -212,6 +212,14 @@ async def execute_trade(sig: dict, symbol: str, paper: bool = True) -> dict:
         )
         if not await confirm_live_position(symbol):
             raise RuntimeError(f"{symbol}: order accepted but no open position found on BingX")
+        # Use actual fill price from exchange instead of signal price
+        try:
+            avg_price = float(order.get("data", {}).get("order", {}).get("avgPrice", 0))
+            if avg_price > 0:
+                log.info("[LIVE] actual fill price: %.6f (signal was %.6f)", avg_price, entry)
+                entry = avg_price
+        except Exception:
+            pass
         log.info("[LIVE] %s order confirmed on exchange: %s", symbol, order)
 
     return {
@@ -246,18 +254,26 @@ async def is_position_closed(symbol: str) -> bool:
 
 
 async def get_live_close_reason(symbol: str, open_time: str) -> str:
-    """Query BingX order history to determine if position was closed by SL or TP."""
+    """Query BingX order history to determine if position was closed by SL or TP.
+    Retries up to 3 times with delay — BingX history may lag by a few seconds."""
     try:
         start_ts = int(datetime.fromisoformat(open_time).timestamp() * 1000)
-        orders = await bingx.get_history_orders(symbol, start_ts=start_ts, limit=10)
-        for order in orders:
-            if order.get("status") != "FILLED":
-                continue
-            otype = order.get("type", "")
-            if otype == "TAKE_PROFIT_MARKET":
-                return "TP"
-            if otype == "STOP_MARKET":
-                return "SL"
+        await asyncio.sleep(3)  # wait for BingX history to update
+        for attempt in range(3):
+            if attempt > 0:
+                await asyncio.sleep(4)
+            orders = await bingx.get_history_orders(symbol, start_ts=start_ts, limit=20)
+            log.info("[close_reason] attempt=%d returned %d orders", attempt + 1, len(orders))
+            for order in orders:
+                status = order.get("status", "")
+                otype = order.get("type", "")
+                log.info("[close_reason] type=%s status=%s", otype, status)
+                if status != "FILLED":
+                    continue
+                if otype == "TAKE_PROFIT_MARKET":
+                    return "TP"
+                if otype == "STOP_MARKET":
+                    return "SL"
     except Exception as e:
         log.warning("get_live_close_reason failed: %s", e)
     return "CLOSED"
