@@ -69,6 +69,22 @@ POSITION_OPEN = "position_open"
 
 bingx = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
+# ── Paper strategy configs (auto-approved, no Telegram keyboard) ──────────────
+
+PAPER_SAR_CONFIGS = [
+    {"name": "SAR_BTC", "symbol": "BTC-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
+    {"name": "SAR_ETH", "symbol": "ETH-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
+    {"name": "SAR_SOL", "symbol": "SOL-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
+]
+PAPER_EMA_CONFIGS = [
+    {"name": "EMA_BTC", "symbol": "BTC-USDT"},
+    {"name": "EMA_ETH", "symbol": "ETH-USDT"},
+    {"name": "EMA_SOL", "symbol": "SOL-USDT"},
+]
+
+def paper_state_path(name: str) -> Path:
+    return _data / f"state_{name.lower()}.json"
+
 # ── State helpers ─────────────────────────────────────────────────────────────
 
 def _empty_state() -> dict:
@@ -196,11 +212,12 @@ async def notify(app: Application, text: str) -> None:
 
 async def execute_trade(sig: dict, symbol: str, paper: bool = True) -> dict:
     entry = sig["entry"]
-    quantity = max(1, round(POSITION_SIZE / entry))
-
     if paper:
-        log.info("[PAPER] Virtual %s %s @ %.5f qty=%d", sig["direction"], symbol, entry, quantity)
+        # Fractional qty → correct PnL for any price (BTC, ETH, DOGE, etc.)
+        quantity = round(POSITION_SIZE / entry, 6)
+        log.info("[PAPER] Virtual %s %s @ %.5f qty=%.6f", sig["direction"], symbol, entry, quantity)
     else:
+        quantity = max(1, round(POSITION_SIZE / entry))
         log.info("[LIVE] Opening %s %s @ %.5f qty=%d", sig["direction"], symbol, entry, quantity)
         await bingx.set_leverage(symbol, LEVERAGE)
         order = await bingx.open_position(
@@ -364,6 +381,122 @@ async def on_position_closed(
         state["cooldown_until"] = time.time() + sl_cooldown
         log.info("[%s] SL cooldown active for %dh", strategy_name, sl_cooldown // 3600)
     save_state(state_path, state)
+
+
+# ── Paper strategy loops (auto-approve, 6 instances: BTC/ETH/SOL × SAR/EMA) ──
+
+async def sar_paper_tick(app: Application, state: dict, cfg: dict, state_path: Path) -> None:
+    """SAR tick for paper — auto-executes signal without user confirmation."""
+    name = cfg["name"]
+    symbol = cfg["symbol"]
+    tf_entry = cfg["tf_entry"]
+    tf_confirm = cfg["tf_confirm"]
+    s = state["state"]
+
+    if s == MONITORING:
+        candles_5m = await bingx.get_klines(symbol, tf_entry, CANDLES_LIMIT)
+        if len(candles_5m) < 3:
+            return
+        closed_5m = candles_5m[:-1]
+        last_ts = closed_5m[-1]["time"]
+        if last_ts == state.get("last_candle_ts"):
+            return
+        state["last_candle_ts"] = last_ts
+        save_state(state_path, state)
+
+        candles_15m = await bingx.get_klines(symbol, tf_confirm, CANDLES_LIMIT)
+        if len(candles_15m) < 3:
+            return
+
+        direction, entry, sar_val = check_signal(closed_5m, candles_15m[:-1])
+        if direction is None:
+            return
+
+        risk = entry - sar_val if direction == "long" else sar_val - entry
+        take = entry + 2 * risk if direction == "long" else entry - 2 * risk
+        sig = {"direction": direction, "entry": entry, "stop": sar_val, "take": take}
+        log.info("[%s] signal %s entry=%.6f sl=%.6f tp=%.6f", name, direction, entry, sar_val, take)
+
+        position = await execute_trade(sig, symbol, paper=True)
+        state["state"] = POSITION_OPEN
+        state["position"] = position
+        state["signal"] = None
+        save_state(state_path, state)
+
+        emoji = "🟢" if direction == "long" else "🔴"
+        await notify(app,
+            f"📝 PAPER | {emoji} *{name}* — {direction.upper()} {symbol.replace('-','')}\n"
+            f"Entry: `{entry:.5f}`  SL: `{sar_val:.5f}`  TP: `{take:.5f}`"
+        )
+
+    elif s == POSITION_OPEN:
+        pos = state.get("position", {})
+        candles = await bingx.get_klines(symbol, tf_entry, 10)
+        close_reason = paper_check_closed(pos, candles[:-1])
+        if close_reason:
+            await on_position_closed(app, state, state_path, close_reason, name, symbol, paper=True)
+
+
+async def ema_paper_tick(app: Application, state: dict, cfg: dict, state_path: Path) -> None:
+    """EMA tick for paper — auto-executes signal without user confirmation."""
+    name = cfg["name"]
+    symbol = cfg["symbol"]
+    s = state["state"]
+
+    if s == MONITORING:
+        if time.time() < state.get("cooldown_until", 0):
+            return
+        candles = await bingx.get_klines(symbol, EMA_TF, EMA_CANDLES)
+        if len(candles) < 110:
+            return
+        closed = candles[:-1]
+        last_ts = closed[-1]["time"]
+        if last_ts == state.get("last_candle_ts"):
+            return
+        state["last_candle_ts"] = last_ts
+        save_state(state_path, state)
+
+        direction, entry, stop = check_ema_signal(closed)
+        if direction is None:
+            return
+
+        risk = entry - stop if direction == "long" else stop - entry
+        take = entry + 2 * risk if direction == "long" else entry - 2 * risk
+        sig = {"direction": direction, "entry": entry, "stop": stop, "take": take}
+        log.info("[%s] signal %s entry=%.4f sl=%.4f tp=%.4f", name, direction, entry, stop, take)
+
+        position = await execute_trade(sig, symbol, paper=True)
+        state["state"] = POSITION_OPEN
+        state["position"] = position
+        state["signal"] = None
+        save_state(state_path, state)
+
+        emoji = "🟢" if direction == "long" else "🔴"
+        await notify(app,
+            f"📝 PAPER | {emoji} *{name}* — {direction.upper()} {symbol.replace('-','')}\n"
+            f"Entry: `{entry:.4f}`  SL: `{stop:.4f}`  TP: `{take:.4f}`"
+        )
+
+    elif s == POSITION_OPEN:
+        pos = state.get("position", {})
+        candles = await bingx.get_klines(symbol, EMA_TF, 10)
+        close_reason = paper_check_closed(pos, candles[:-1])
+        if close_reason:
+            await on_position_closed(app, state, state_path, close_reason, name, symbol,
+                                     paper=True, sl_cooldown=SL_COOLDOWN)
+
+
+async def paper_strategy_loop(app: Application, tick_fn, cfg: dict, interval: float) -> None:
+    name = cfg["name"]
+    state_path = paper_state_path(name)
+    log.info("[%s] paper loop started.", name)
+    while True:
+        state = load_state(state_path)
+        try:
+            await tick_fn(app, state, cfg, state_path)
+        except Exception as e:
+            log.error("[%s] paper tick error: %s", name, e, exc_info=True)
+        await asyncio.sleep(interval)
 
 
 # ── SAR loop ──────────────────────────────────────────────────────────────────
@@ -697,16 +830,39 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         lines.append("No trades yet")
 
-    lines.append("\n📋 *PAPER history*")
+    lines.append("\n━━━━━━━━━━━━━━━")
+    lines.append("📋 *PAPER stats*")
     paper = read_trade_stats("PAPER")
     if paper:
-        for strat, s in paper.items():
+        for strat, s in sorted(paper.items()):
             total = s["wins"] + s["losses"]
             wr = round(s["wins"] / total * 100) if total else 0
             pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"{strat}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
+            lines.append(f"{strat}: {s['wins']}W/{s['losses']}L WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
     else:
         lines.append("No trades yet")
+
+    # Open paper positions
+    open_papers = []
+    for pcfg in PAPER_SAR_CONFIGS + PAPER_EMA_CONFIGS:
+        sp = paper_state_path(pcfg["name"])
+        pst = load_state(sp)
+        if pst.get("state") == POSITION_OPEN:
+            pos = pst.get("position", {})
+            d = pos.get("direction", "?").upper()
+            e = float(pos.get("entry", 0))
+            try:
+                tf = pcfg.get("tf_entry", "5m")
+                candles = await bingx.get_klines(pcfg["symbol"], tf, 2)
+                price = float(candles[-1]["close"])
+                upnl = round((price - e if d == "LONG" else e - price) / e * POSITION_SIZE, 2)
+                upnl_str = f"`{upnl:+.2f}$`"
+            except Exception:
+                upnl_str = "?"
+            open_papers.append(f"  {pcfg['name']}: {d} @ `{e:.5f}` uPnL {upnl_str}")
+    if open_papers:
+        lines.append("Open positions:")
+        lines.extend(open_papers)
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -870,7 +1026,15 @@ def main() -> None:
         ])
         asyncio.create_task(sar_loop(application))
         asyncio.create_task(ema_loop(application))
-        log.info("Bot started. SAR→%s | EMA→%s | PAPER=%s", SYMBOL, SOL_SYMBOL, PAPER_MODE)
+        for pcfg in PAPER_SAR_CONFIGS:
+            asyncio.create_task(paper_strategy_loop(application, sar_paper_tick, pcfg, LOOP_INTERVAL))
+        for pcfg in PAPER_EMA_CONFIGS:
+            asyncio.create_task(paper_strategy_loop(application, ema_paper_tick, pcfg, 30))
+        log.info(
+            "Bot started. LIVE: SAR→%s | EMA→%s | Paper loops: %d",
+            SYMBOL, SOL_SYMBOL,
+            len(PAPER_SAR_CONFIGS) + len(PAPER_EMA_CONFIGS),
+        )
 
     app.post_init = on_startup
     app.run_polling(allowed_updates=["callback_query", "message"])
