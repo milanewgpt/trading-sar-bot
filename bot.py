@@ -79,7 +79,6 @@ PAPER_SAR_CONFIGS = [
 PAPER_EMA_CONFIGS = [
     {"name": "EMA_BTC", "symbol": "BTC-USDT"},
     {"name": "EMA_ETH", "symbol": "ETH-USDT"},
-    {"name": "EMA_SOL", "symbol": "SOL-USDT"},
 ]
 
 def paper_state_path(name: str) -> Path:
