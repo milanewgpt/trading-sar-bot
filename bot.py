@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -112,6 +112,27 @@ def append_trade_log(row: dict) -> None:
         "mode", "strategy", "timestamp", "symbol", "direction",
         "entry", "stop", "take", "quantity", "margin", "close_reason", "result",
     ]
+    # Dedup guard: skip if identical trade (same strategy+entry+direction) was logged in last 2h
+    if TRADE_LOG.exists():
+        try:
+            with open(TRADE_LOG, newline="") as f:
+                rows = list(csv.DictReader(f))
+            cutoff = time.time() - 7200  # 2 hours
+            for r in rows[-50:]:  # check last 50 rows only
+                try:
+                    ts = datetime.fromisoformat(r.get("timestamp", "")).timestamp()
+                except Exception:
+                    continue
+                if (ts > cutoff
+                        and r.get("strategy") == row.get("strategy")
+                        and r.get("entry") == str(row.get("entry"))
+                        and r.get("direction") == row.get("direction")):
+                    log.warning("[dedup] skipping duplicate trade %s %s @ %s",
+                                row.get("strategy"), row.get("direction"), row.get("entry"))
+                    return
+        except Exception as e:
+            log.warning("[dedup] check failed: %s", e)
+
     exists = TRADE_LOG.exists()
     with open(TRADE_LOG, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -999,103 +1020,6 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-# ── Morning report (daily 06:00 UTC = 09:00 Israel) ──────────────────────────
-
-def _build_morning_report() -> str:
-    """Build SAR/EMA daily stats block from trades.csv."""
-    live  = read_trade_stats("LIVE")
-    paper = read_trade_stats("PAPER")
-
-    lines = ["⚡ <b>SAR BOT — DAILY REPORT</b>"]
-
-    # LIVE section
-    lines.append("\n<b>LIVE trades</b>")
-    if live:
-        for strat, s in sorted(live.items()):
-            total = s["wins"] + s["losses"]
-            wr    = round(s["wins"] / total * 100) if total else 0
-            wr_e  = "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
-            pnl_e = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"  {strat}: {s['wins']}W/{s['losses']}L  WR {wr_e} {wr}%  {pnl_e} {s['pnl']:+.2f}$")
-    else:
-        lines.append("  нет сделок")
-
-    # PAPER section
-    lines.append("\n<b>PAPER trades</b>")
-    if paper:
-        for strat, s in sorted(paper.items()):
-            total = s["wins"] + s["losses"]
-            wr    = round(s["wins"] / total * 100) if total else 0
-            wr_e  = "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
-            pnl_e = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"  {strat}: {s['wins']}W/{s['losses']}L  WR {wr_e} {wr}%  {pnl_e} {s['pnl']:+.2f}$")
-    else:
-        lines.append("  нет сделок")
-
-    # Quick analysis
-    lines.append("\n<i>💡 Анализ:</i>")
-    all_stats = {**live, **paper}
-    if not all_stats:
-        lines.append("  нет данных — стратегии ещё не совершили сделок")
-    else:
-        for strat, s in all_stats.items():
-            total = s["wins"] + s["losses"]
-            if total == 0:
-                continue
-            wr = s["wins"] / total * 100
-            if s["pnl"] < -30:
-                lines.append(f"  • {strat}: убыток {s['pnl']:+.2f}$ — пересмотри параметры SL/TP")
-            elif wr < 35 and total >= 10:
-                lines.append(f"  • {strat}: WR {wr:.0f}% — проверь условия входа")
-            elif wr >= 55 and s["pnl"] > 0:
-                lines.append(f"  • {strat}: ✅ рабочий результат (WR {wr:.0f}%, PnL {s['pnl']:+.2f}$)")
-
-    # SAR/EMA current state
-    sar_state = load_state(STATE_SAR)
-    ema_state = load_state(STATE_EMA)
-    sar_s = sar_state.get("state", "?")
-    ema_s = ema_state.get("state", "?")
-    state_labels = {
-        MONITORING: "👀 мониторинг",
-        PENDING_APPROVAL: "⏳ ждёт approve",
-        POSITION_OPEN: "📈 позиция открыта",
-    }
-    lines.append(
-        f"\nСтатус: SAR→{state_labels.get(sar_s, sar_s)}  |  EMA→{state_labels.get(ema_s, ema_s)}"
-    )
-
-    return "\n".join(lines)
-
-
-async def morning_report_loop(app: Application) -> None:
-    """Wait until 06:00 UTC, send report, then repeat daily."""
-    import math
-    log.info("[morning_report] scheduler started.")
-    while True:
-        now = datetime.now(timezone.utc)
-        # Next 06:00 UTC
-        target = now.replace(hour=6, minute=0, second=0, microsecond=0)
-        if now >= target:
-            target = target + timedelta(days=1)
-        wait_sec = (target - now).total_seconds()
-        log.info("[morning_report] next report in %.0f min", wait_sec / 60)
-        await asyncio.sleep(wait_sec)
-
-        try:
-            text = _build_morning_report()
-            await app.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=text,
-                parse_mode="HTML",
-            )
-            log.info("[morning_report] sent at %s", datetime.now(timezone.utc).isoformat())
-        except Exception as e:
-            log.error("[morning_report] failed to send: %s", e)
-
-        # sleep 1 min to avoid double-fire at exact 06:00
-        await asyncio.sleep(60)
-
-
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -1122,7 +1046,6 @@ def main() -> None:
         ])
         asyncio.create_task(sar_loop(application))
         asyncio.create_task(ema_loop(application))
-        asyncio.create_task(morning_report_loop(application))
         for pcfg in PAPER_SAR_CONFIGS:
             asyncio.create_task(paper_strategy_loop(application, sar_paper_tick, pcfg, LOOP_INTERVAL))
         for pcfg in PAPER_EMA_CONFIGS:
