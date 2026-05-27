@@ -68,6 +68,20 @@ for row in to_add:
         changed = True
         print(f"migration: added {row['timestamp']} {row['strategy']}")
 
+# Deduplicate paper trades: for same strategy+symbol+direction+entry, keep only first occurrence
+seen = {}
+deduped = []
+for r in rows:
+    key = (r.get("strategy"), r.get("symbol"), r.get("direction"), r.get("entry"))
+    if r.get("mode") == "PAPER" and key in seen:
+        changed = True
+        print(f"migration: removed duplicate paper trade {r.get('strategy')} {r.get('direction')} @ {r.get('entry')} ts={r.get('timestamp')}")
+    else:
+        deduped.append(r)
+        if r.get("mode") == "PAPER":
+            seen[key] = True
+rows = deduped
+
 if changed:
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
