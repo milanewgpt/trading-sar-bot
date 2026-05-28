@@ -1089,14 +1089,18 @@ def _build_morning_report() -> str:
 
 
 async def morning_report_loop(app: Application) -> None:
-    """Wait until 06:00 UTC, send report, then repeat daily."""
-    # Use dedicated chat for morning report if set, otherwise fall back to bot's main chat
+    """Wait until 06:00 UTC, send report, then repeat daily.
+
+    Uses MORNING_REPORT_TOKEN + MORNING_REPORT_CHAT_ID if set,
+    so the message arrives from the same bot as the VPS unified report.
+    """
     _report_chat_id_str = os.getenv("MORNING_REPORT_CHAT_ID", "")
     report_chat_id = int(_report_chat_id_str) if _report_chat_id_str else TELEGRAM_CHAT_ID
-    log.info("[morning_report] scheduler started. target chat_id=%s", report_chat_id)
+    report_token = os.getenv("MORNING_REPORT_TOKEN", "")
+    log.info("[morning_report] scheduler started. chat_id=%s own_token=%s",
+             report_chat_id, not bool(report_token))
     while True:
         now = datetime.now(timezone.utc)
-        # Next 06:00 UTC
         target = now.replace(hour=6, minute=0, second=0, microsecond=0)
         if now >= target:
             target = target + timedelta(days=1)
@@ -1106,16 +1110,17 @@ async def morning_report_loop(app: Application) -> None:
 
         try:
             text = _build_morning_report()
-            await app.bot.send_message(
-                chat_id=report_chat_id,
-                text=text,
-                parse_mode="HTML",
-            )
+            if report_token:
+                # Send via a separate bot token so message lands in the unified report chat
+                from telegram import Bot as _Bot
+                async with _Bot(token=report_token) as _bot:
+                    await _bot.send_message(chat_id=report_chat_id, text=text, parse_mode="HTML")
+            else:
+                await app.bot.send_message(chat_id=report_chat_id, text=text, parse_mode="HTML")
             log.info("[morning_report] sent at %s", datetime.now(timezone.utc).isoformat())
         except Exception as e:
             log.error("[morning_report] failed to send: %s", e)
 
-        # sleep 1 min to avoid double-fire at exact 06:00
         await asyncio.sleep(60)
 
 
