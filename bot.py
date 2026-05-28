@@ -112,19 +112,25 @@ def append_trade_log(row: dict) -> None:
         "mode", "strategy", "timestamp", "symbol", "direction",
         "entry", "stop", "take", "quantity", "margin", "close_reason", "result",
     ]
-    # Dedup guard: skip if identical trade (same strategy+entry+direction) was logged in last 2h
+    # Dedup guard: PAPER — full history scan (no time limit, catches restart re-logs)
+    # LIVE — 2h window only
     if TRADE_LOG.exists():
         try:
             with open(TRADE_LOG, newline="") as f:
-                rows = list(csv.DictReader(f))
-            cutoff = time.time() - 7200  # 2 hours
-            for r in rows[-50:]:  # check last 50 rows only
-                try:
-                    ts = datetime.fromisoformat(r.get("timestamp", "")).timestamp()
-                except Exception:
-                    continue
-                if (ts > cutoff
-                        and r.get("strategy") == row.get("strategy")
+                existing = list(csv.DictReader(f))
+            is_paper = row.get("mode") == "PAPER"
+            cutoff = 0 if is_paper else time.time() - 7200
+            scan = existing if is_paper else existing[-50:]
+            for r in scan:
+                if not is_paper:
+                    try:
+                        ts = datetime.fromisoformat(r.get("timestamp", "")).timestamp()
+                    except Exception:
+                        continue
+                    if ts <= cutoff:
+                        continue
+                if (r.get("strategy") == row.get("strategy")
+                        and r.get("symbol") == row.get("symbol")
                         and r.get("entry") == str(row.get("entry"))
                         and r.get("direction") == row.get("direction")):
                     log.warning("[dedup] skipping duplicate trade %s %s @ %s",
