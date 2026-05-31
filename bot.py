@@ -76,7 +76,6 @@ bingx = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
 PAPER_SAR_CONFIGS = [
     {"name": "SAR_BTC", "symbol": "BTC-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
-    {"name": "SAR_ETH", "symbol": "ETH-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
     {"name": "SAR_SOL", "symbol": "SOL-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
 ]
 PAPER_EMA_CONFIGS = [
