@@ -57,8 +57,11 @@ EMA_CANDLES = 220  # need 100+ for EMA100 warmup
 
 _data = Path(DATA_DIR)
 _data.mkdir(parents=True, exist_ok=True)
-STATE_SAR = _data / "state_sar.json"
-STATE_EMA = _data / "state_ema.json"
+STATE_SAR          = _data / "state_sar.json"
+STATE_EMA          = _data / "state_ema.json"
+STATE_SAR_ETH_LIVE = _data / "state_sar_eth_live.json"
+
+ETH_SAR_SYMBOL = "ETH-USDT"
 TRADE_LOG  = _data / "trades.csv"
 
 SL_COOLDOWN = 4 * 3600  # 4h cooldown after SL hit
@@ -176,15 +179,19 @@ def read_trade_stats(mode_filter: str) -> dict:
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
 
-def _sar_signal_text(sig: dict) -> str:
+def _sar_signal_text(sig: dict, symbol: str = None) -> str:
+    if symbol is None:
+        symbol = SYMBOL
     d = sig["direction"].upper()
     emoji = "🟢" if sig["direction"] == "long" else "🔴"
+    sym_label = symbol.replace("-", "")
+    fmt = ".6f" if "DOGE" in symbol else ".4f"
     return (
-        f"{emoji} *DOGEUSDT — {d}*\n"
+        f"{emoji} *{sym_label} — {d}*\n"
         f"_Strategy: SAR + SMA 5m/15m_\n\n"
-        f"Entry: `{sig['entry']:.6f}`\n"
-        f"Stop Loss: `{sig['stop']:.6f}`\n"
-        f"Take Profit: `{sig['take']:.6f}`\n\n"
+        f"Entry: `{sig['entry']:{fmt}}`\n"
+        f"Stop Loss: `{sig['stop']:{fmt}}`\n"
+        f"Take Profit: `{sig['take']:{fmt}}`\n\n"
         f"Margin: ${MARGIN}  |  Leverage: x{LEVERAGE}\n"
         f"Position size: ${POSITION_SIZE}\n"
         f"RR: 1:2"
@@ -538,13 +545,27 @@ async def sar_loop(app: Application) -> None:
         await asyncio.sleep(LOOP_INTERVAL)
 
 
-async def sar_tick(app: Application, state: dict) -> None:
+async def sar_eth_loop(app: Application) -> None:
+    log.info("[SAR_ETH] loop started.")
+    while True:
+        state = load_state(STATE_SAR_ETH_LIVE)
+        try:
+            await sar_eth_tick(app, state)
+        except Exception as e:
+            log.error("[SAR_ETH] tick error: %s", e, exc_info=True)
+        await asyncio.sleep(LOOP_INTERVAL)
+
+
+async def _sar_live_tick(
+    app: Application, state: dict, *,
+    symbol: str, state_path: Path, strategy_name: str, callback_prefix: str, paper: bool,
+) -> None:
     if state.get("paused"):
         return
     s = state["state"]
 
     if s == MONITORING:
-        candles_5m = await bingx.get_klines(SYMBOL, TF_ENTRY, CANDLES_LIMIT)
+        candles_5m = await bingx.get_klines(symbol, TF_ENTRY, CANDLES_LIMIT)
         if len(candles_5m) < 3:
             return
 
@@ -554,11 +575,11 @@ async def sar_tick(app: Application, state: dict) -> None:
         if last_ts == state.get("last_candle_ts"):
             return
 
-        log.info("[SAR] new candle ts=%s close=%.6f", last_ts, float(closed_5m[-1]["close"]))
+        log.info("[%s] new candle ts=%s close=%.6f", strategy_name, last_ts, float(closed_5m[-1]["close"]))
         state["last_candle_ts"] = last_ts
-        save_state(STATE_SAR, state)  # persist so dedup works across ticks
+        save_state(state_path, state)
 
-        candles_15m = await bingx.get_klines(SYMBOL, TF_CONFIRM, CANDLES_LIMIT)
+        candles_15m = await bingx.get_klines(symbol, TF_CONFIRM, CANDLES_LIMIT)
         if len(candles_15m) < 3:
             return
 
@@ -578,27 +599,43 @@ async def sar_tick(app: Application, state: dict) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        log.info("[SAR] signal %s entry=%.6f sl=%.6f tp=%.6f", direction, entry, sar_val, take)
-        msg_id = await send_signal(app, _sar_signal_text(sig), "sar")
+        log.info("[%s] signal %s entry=%.6f sl=%.6f tp=%.6f", strategy_name, direction, entry, sar_val, take)
+        msg_id = await send_signal(app, _sar_signal_text(sig, symbol), callback_prefix)
 
         state["state"] = PENDING_APPROVAL
         state["signal"] = sig
         state["pending_msg_id"] = msg_id
-        save_state(STATE_SAR, state)
+        save_state(state_path, state)
 
     elif s == POSITION_OPEN:
         pos = state.get("position", {})
-        if SAR_PAPER_MODE:
-            candles = await bingx.get_klines(SYMBOL, TF_ENTRY, 10)
+        if paper:
+            candles = await bingx.get_klines(symbol, TF_ENTRY, 10)
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
-            if await is_position_closed(SYMBOL):
-                close_reason = await get_live_close_reason(SYMBOL, pos.get("open_time", ""))
+            if await is_position_closed(symbol):
+                close_reason = await get_live_close_reason(symbol, pos.get("open_time", ""))
             else:
                 close_reason = None
 
         if close_reason:
-            await on_position_closed(app, state, STATE_SAR, close_reason, "SAR", SYMBOL, paper=SAR_PAPER_MODE)
+            await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=paper)
+
+
+async def sar_tick(app: Application, state: dict) -> None:
+    await _sar_live_tick(
+        app, state,
+        symbol=SYMBOL, state_path=STATE_SAR, strategy_name="SAR",
+        callback_prefix="sar", paper=SAR_PAPER_MODE,
+    )
+
+
+async def sar_eth_tick(app: Application, state: dict) -> None:
+    await _sar_live_tick(
+        app, state,
+        symbol=ETH_SAR_SYMBOL, state_path=STATE_SAR_ETH_LIVE, strategy_name="SAR_ETH",
+        callback_prefix="sar_eth", paper=False,
+    )
 
 
 # ── EMA loop ──────────────────────────────────────────────────────────────────
@@ -694,6 +731,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if prefix == "sar":
         await _handle_approval(query, context, action, STATE_SAR, SYMBOL, "SAR", paper=SAR_PAPER_MODE)
+    elif prefix == "sar_eth":
+        await _handle_approval(query, context, action, STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, "SAR_ETH", paper=False)
     elif prefix == "ema":
         await _handle_approval(query, context, action, STATE_EMA, SOL_SYMBOL, "EMA", paper=PAPER_MODE)
 
@@ -770,6 +809,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # ── SAR + EMA ─────────────────────────────────────────────────────────────
     strategies = [
         ("SAR", STATE_SAR, SYMBOL, TF_ENTRY),
+        ("SAR_ETH 🔴 LIVE", STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, TF_ENTRY),
         ("EMA", STATE_EMA, SOL_SYMBOL, EMA_TF),
     ]
 
@@ -990,6 +1030,27 @@ async def close_sar_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _manual_close(update, state, STATE_SAR, "SAR", SYMBOL, TF_ENTRY, paper=SAR_PAPER_MODE)
 
 
+# ── SAR ETH control (LIVE) ────────────────────────────────────────────────────
+
+async def stop_sar_eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_ETH_LIVE)
+    state["paused"] = True
+    save_state(STATE_SAR_ETH_LIVE, state)
+    await update.message.reply_text("⏸ SAR_ETH paused.")
+
+
+async def start_sar_eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_ETH_LIVE)
+    state["paused"] = False
+    save_state(STATE_SAR_ETH_LIVE, state)
+    await update.message.reply_text("▶️ SAR_ETH resumed.")
+
+
+async def close_sar_eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_ETH_LIVE)
+    await _manual_close(update, state, STATE_SAR_ETH_LIVE, "SAR_ETH", ETH_SAR_SYMBOL, TF_ENTRY, paper=False)
+
+
 # ── EMA control ───────────────────────────────────────────────────────────────
 
 async def stop_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1135,26 +1196,33 @@ def main() -> None:
 
     app.add_handler(CommandHandler("status",    status_command))
     app.add_handler(CommandHandler("trades",    trades_command))
-    app.add_handler(CommandHandler("stop_sar",  stop_sar_command))
-    app.add_handler(CommandHandler("start_sar", start_sar_command))
-    app.add_handler(CommandHandler("close_sar", close_sar_command))
-    app.add_handler(CommandHandler("stop_ema",  stop_ema_command))
-    app.add_handler(CommandHandler("start_ema", start_ema_command))
-    app.add_handler(CommandHandler("close_ema", close_ema_command))
+    app.add_handler(CommandHandler("stop_sar",      stop_sar_command))
+    app.add_handler(CommandHandler("start_sar",     start_sar_command))
+    app.add_handler(CommandHandler("close_sar",     close_sar_command))
+    app.add_handler(CommandHandler("stop_sar_eth",  stop_sar_eth_command))
+    app.add_handler(CommandHandler("start_sar_eth", start_sar_eth_command))
+    app.add_handler(CommandHandler("close_sar_eth", close_sar_eth_command))
+    app.add_handler(CommandHandler("stop_ema",      stop_ema_command))
+    app.add_handler(CommandHandler("start_ema",     start_ema_command))
+    app.add_handler(CommandHandler("close_ema",     close_ema_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     async def on_startup(application: Application) -> None:
         await application.bot.set_my_commands([
             ("status",    "📊 Show all strategies status"),
             ("trades",    "📋 Show trades.csv"),
-            ("stop_sar",  "⏸ Pause SAR strategy"),
-            ("start_sar", "▶️ Resume SAR strategy"),
-            ("close_sar", "🛑 Close SAR position manually"),
-            ("stop_ema",  "⏸ Pause EMA strategy"),
-            ("start_ema", "▶️ Resume EMA strategy"),
-            ("close_ema", "🛑 Close EMA position manually"),
+            ("stop_sar",      "⏸ Pause SAR DOGE"),
+            ("start_sar",     "▶️ Resume SAR DOGE"),
+            ("close_sar",     "🛑 Close SAR DOGE manually"),
+            ("stop_sar_eth",  "⏸ Pause SAR ETH"),
+            ("start_sar_eth", "▶️ Resume SAR ETH"),
+            ("close_sar_eth", "🛑 Close SAR ETH manually"),
+            ("stop_ema",      "⏸ Pause EMA SOL"),
+            ("start_ema",     "▶️ Resume EMA SOL"),
+            ("close_ema",     "🛑 Close EMA SOL manually"),
         ])
         asyncio.create_task(sar_loop(application))
+        asyncio.create_task(sar_eth_loop(application))
         asyncio.create_task(ema_loop(application))
         asyncio.create_task(morning_report_loop(application))
         for pcfg in PAPER_SAR_CONFIGS:
@@ -1162,8 +1230,8 @@ def main() -> None:
         for pcfg in PAPER_EMA_CONFIGS:
             asyncio.create_task(paper_strategy_loop(application, ema_paper_tick, pcfg, 30))
         log.info(
-            "Bot started. LIVE: SAR→%s | EMA→%s | Paper loops: %d",
-            SYMBOL, SOL_SYMBOL,
+            "Bot started. LIVE: SAR→%s | SAR_ETH→%s | EMA→%s | Paper loops: %d",
+            SYMBOL, ETH_SAR_SYMBOL, SOL_SYMBOL,
             len(PAPER_SAR_CONFIGS) + len(PAPER_EMA_CONFIGS),
         )
 
