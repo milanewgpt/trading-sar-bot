@@ -60,8 +60,16 @@ _data.mkdir(parents=True, exist_ok=True)
 STATE_SAR          = _data / "state_sar.json"
 STATE_EMA          = _data / "state_ema.json"
 STATE_SAR_ETH_LIVE = _data / "state_sar_eth_live.json"
+STATE_SAR_BTC_LIVE = _data / "state_sar_btc_live.json"
+STATE_SAR_SOL_LIVE = _data / "state_sar_sol_live.json"
+STATE_EMA_BTC_LIVE = _data / "state_ema_btc_live.json"
+STATE_EMA_ETH_LIVE = _data / "state_ema_eth_live.json"
 
 ETH_SAR_SYMBOL = "ETH-USDT"
+BTC_SAR_SYMBOL = "BTC-USDT"
+SOL_SAR_SYMBOL = "SOL-USDT"
+BTC_EMA_SYMBOL = "BTC-USDT"
+ETH_EMA_SYMBOL = "ETH-USDT"
 TRADE_LOG  = _data / "trades.csv"
 
 SL_COOLDOWN = 4 * 3600  # 4h cooldown after SL hit
@@ -74,14 +82,8 @@ bingx = BingXClient(BINGX_API_KEY, BINGX_SECRET_KEY)
 
 # ── Paper strategy configs (auto-approved, no Telegram keyboard) ──────────────
 
-PAPER_SAR_CONFIGS = [
-    {"name": "SAR_BTC", "symbol": "BTC-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
-    {"name": "SAR_SOL", "symbol": "SOL-USDT", "tf_entry": "5m", "tf_confirm": "15m"},
-]
-PAPER_EMA_CONFIGS = [
-    {"name": "EMA_BTC", "symbol": "BTC-USDT"},
-    {"name": "EMA_ETH", "symbol": "ETH-USDT"},
-]
+PAPER_SAR_CONFIGS = []
+PAPER_EMA_CONFIGS = []
 
 def paper_state_path(name: str) -> Path:
     return _data / f"state_{name.lower()}.json"
@@ -197,12 +199,15 @@ def _sar_signal_text(sig: dict, symbol: str = None) -> str:
     )
 
 
-def _ema_signal_text(sig: dict) -> str:
+def _ema_signal_text(sig: dict, symbol: str = None) -> str:
+    if symbol is None:
+        symbol = SOL_SYMBOL
     d = sig["direction"].upper()
     emoji = "🟢" if sig["direction"] == "long" else "🔴"
+    sym_label = symbol.replace("-", "")
     det = sig.get("details", {})
     return (
-        f"{emoji} *SOLUSDT — {d}*\n"
+        f"{emoji} *{sym_label} — {d}*\n"
         f"_Strategy: EMA Pullback 1h_\n\n"
         f"Entry: `{sig['entry']:.4f}`\n"
         f"Stop Loss: `{sig['stop']:.4f}`\n"
@@ -556,6 +561,28 @@ async def sar_eth_loop(app: Application) -> None:
         await asyncio.sleep(LOOP_INTERVAL)
 
 
+async def sar_btc_loop(app: Application) -> None:
+    log.info("[SAR_BTC] loop started.")
+    while True:
+        state = load_state(STATE_SAR_BTC_LIVE)
+        try:
+            await sar_btc_tick(app, state)
+        except Exception as e:
+            log.error("[SAR_BTC] tick error: %s", e, exc_info=True)
+        await asyncio.sleep(LOOP_INTERVAL)
+
+
+async def sar_sol_loop(app: Application) -> None:
+    log.info("[SAR_SOL] loop started.")
+    while True:
+        state = load_state(STATE_SAR_SOL_LIVE)
+        try:
+            await sar_sol_tick(app, state)
+        except Exception as e:
+            log.error("[SAR_SOL] tick error: %s", e, exc_info=True)
+        await asyncio.sleep(LOOP_INTERVAL)
+
+
 async def _sar_live_tick(
     app: Application, state: dict, *,
     symbol: str, state_path: Path, strategy_name: str, callback_prefix: str, paper: bool,
@@ -638,6 +665,23 @@ async def sar_eth_tick(app: Application, state: dict) -> None:
     )
 
 
+async def sar_btc_tick(app: Application, state: dict) -> None:
+    await _sar_live_tick(
+        app, state,
+        symbol=BTC_SAR_SYMBOL, state_path=STATE_SAR_BTC_LIVE, strategy_name="SAR_BTC",
+        callback_prefix="sar_btc", paper=False,
+    )
+
+
+async def sar_sol_tick(app: Application, state: dict) -> None:
+    await _sar_live_tick(
+        app, state,
+        symbol=SOL_SAR_SYMBOL, state_path=STATE_SAR_SOL_LIVE, strategy_name="SAR_SOL",
+        callback_prefix="sar_sol", paper=False,
+    )
+
+
+
 # ── EMA loop ──────────────────────────────────────────────────────────────────
 
 async def ema_loop(app: Application) -> None:
@@ -718,6 +762,104 @@ async def ema_tick(app: Application, state: dict) -> None:
             await on_position_closed(app, state, STATE_EMA, close_reason, "EMA", SOL_SYMBOL, paper=PAPER_MODE, sl_cooldown=SL_COOLDOWN)
 
 
+async def _ema_live_tick(
+    app: Application, state: dict, *,
+    symbol: str, state_path: Path, strategy_name: str, callback_prefix: str,
+) -> None:
+    if state.get("paused"):
+        return
+    s = state["state"]
+
+    if s == MONITORING:
+        cooldown_until = state.get("cooldown_until", 0)
+        if time.time() < cooldown_until:
+            log.info("[%s] cooldown active, %dm remaining", strategy_name, int(cooldown_until - time.time()) // 60)
+            return
+
+        candles = await bingx.get_klines(symbol, EMA_TF, EMA_CANDLES)
+        if len(candles) < 110:
+            return
+
+        closed = candles[:-1]
+        last_ts = closed[-1]["time"]
+
+        if last_ts == state.get("last_candle_ts"):
+            return
+
+        log.info("[%s] new candle ts=%s close=%.4f", strategy_name, last_ts, float(closed[-1]["close"]))
+        state["last_candle_ts"] = last_ts
+        save_state(state_path, state)
+
+        direction, entry, stop = check_ema_signal(closed)
+        if direction is None:
+            return
+
+        risk = entry - stop if direction == "long" else stop - entry
+        take = entry + 2 * risk if direction == "long" else entry - 2 * risk
+        details = signal_details(closed)
+
+        sig = {
+            "direction": direction,
+            "entry": entry,
+            "stop": stop,
+            "take": take,
+            "details": details,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        log.info("[%s] signal %s entry=%.4f sl=%.4f tp=%.4f", strategy_name, direction, entry, stop, take)
+        msg_id = await send_signal(app, _ema_signal_text(sig, symbol), callback_prefix)
+
+        state["state"] = PENDING_APPROVAL
+        state["signal"] = sig
+        state["pending_msg_id"] = msg_id
+        save_state(state_path, state)
+
+    elif s == POSITION_OPEN:
+        pos = state.get("position", {})
+        if await is_position_closed(symbol):
+            close_reason = await get_live_close_reason(symbol, pos.get("open_time", ""))
+        else:
+            close_reason = None
+
+        if close_reason:
+            await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=False, sl_cooldown=SL_COOLDOWN)
+
+
+async def ema_btc_loop(app: Application) -> None:
+    log.info("[EMA_BTC] loop started.")
+    while True:
+        state = load_state(STATE_EMA_BTC_LIVE)
+        try:
+            await ema_btc_tick(app, state)
+        except Exception as e:
+            log.error("[EMA_BTC] tick error: %s", e, exc_info=True)
+        await asyncio.sleep(30)
+
+
+async def ema_eth_loop(app: Application) -> None:
+    log.info("[EMA_ETH] loop started.")
+    while True:
+        state = load_state(STATE_EMA_ETH_LIVE)
+        try:
+            await ema_eth_tick(app, state)
+        except Exception as e:
+            log.error("[EMA_ETH] tick error: %s", e, exc_info=True)
+        await asyncio.sleep(30)
+
+
+async def ema_btc_tick(app: Application, state: dict) -> None:
+    await _ema_live_tick(app, state,
+        symbol=BTC_EMA_SYMBOL, state_path=STATE_EMA_BTC_LIVE,
+        strategy_name="EMA_BTC", callback_prefix="ema_btc")
+
+
+async def ema_eth_tick(app: Application, state: dict) -> None:
+    await _ema_live_tick(app, state,
+        symbol=ETH_EMA_SYMBOL, state_path=STATE_EMA_ETH_LIVE,
+        strategy_name="EMA_ETH", callback_prefix="ema_eth")
+
+
 # ── Callback handler (routes by prefix) ──────────────────────────────────────
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -733,8 +875,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _handle_approval(query, context, action, STATE_SAR, SYMBOL, "SAR", paper=SAR_PAPER_MODE)
     elif prefix == "sar_eth":
         await _handle_approval(query, context, action, STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, "SAR_ETH", paper=False)
+    elif prefix == "sar_btc":
+        await _handle_approval(query, context, action, STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL, "SAR_BTC", paper=False)
+    elif prefix == "sar_sol":
+        await _handle_approval(query, context, action, STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL, "SAR_SOL", paper=False)
     elif prefix == "ema":
         await _handle_approval(query, context, action, STATE_EMA, SOL_SYMBOL, "EMA", paper=PAPER_MODE)
+    elif prefix == "ema_btc":
+        await _handle_approval(query, context, action, STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL, "EMA_BTC", paper=False)
+    elif prefix == "ema_eth":
+        await _handle_approval(query, context, action, STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL, "EMA_ETH", paper=False)
 
 
 async def _handle_approval(
@@ -766,11 +916,12 @@ async def _handle_approval(
 
             mode_tag = "📝 PAPER" if paper else "✅ LIVE"
             sym_label = symbol.replace("-", "")
+            safe_name = strategy_name.replace("_", "\\_")
             await context.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=(
                     f"{mode_tag} | *Position opened*\n"
-                    f"_Strategy: {strategy_name}_\n\n"
+                    f"_Strategy: {safe_name}_\n\n"
                     f"*{sig['direction'].upper()}* {sym_label}\n"
                     f"Entry: `{sig['entry']:.5f}`\n"
                     f"SL: `{sig['stop']:.5f}`\n"
@@ -808,9 +959,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── SAR + EMA ─────────────────────────────────────────────────────────────
     strategies = [
-        ("SAR", STATE_SAR, SYMBOL, TF_ENTRY),
+        ("SAR 🔴 LIVE",     STATE_SAR,          SYMBOL,         TF_ENTRY),
         ("SAR_ETH 🔴 LIVE", STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, TF_ENTRY),
-        ("EMA", STATE_EMA, SOL_SYMBOL, EMA_TF),
+        ("SAR_BTC 🔴 LIVE", STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL, TF_ENTRY),
+        ("SAR_SOL 🔴 LIVE", STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL, TF_ENTRY),
+        ("EMA 🔴 LIVE",     STATE_EMA,          SOL_SYMBOL,     EMA_TF),
+        ("EMA_BTC 🔴 LIVE", STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL, EMA_TF),
+        ("EMA_ETH 🔴 LIVE", STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL, EMA_TF),
     ]
 
     for name, state_path, symbol, tf in strategies:
@@ -1072,6 +1227,90 @@ async def close_ema_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await _manual_close(update, state, STATE_EMA, "EMA", SOL_SYMBOL, EMA_TF, paper=PAPER_MODE)
 
 
+# ── SAR BTC control (LIVE) ────────────────────────────────────────────────────
+
+async def stop_sar_btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_BTC_LIVE)
+    state["paused"] = True
+    save_state(STATE_SAR_BTC_LIVE, state)
+    await update.message.reply_text("⏸ SAR_BTC paused.")
+
+
+async def start_sar_btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_BTC_LIVE)
+    state["paused"] = False
+    save_state(STATE_SAR_BTC_LIVE, state)
+    await update.message.reply_text("▶️ SAR_BTC resumed.")
+
+
+async def close_sar_btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_BTC_LIVE)
+    await _manual_close(update, state, STATE_SAR_BTC_LIVE, "SAR_BTC", BTC_SAR_SYMBOL, TF_ENTRY, paper=False)
+
+
+# ── SAR SOL control (LIVE) ────────────────────────────────────────────────────
+
+async def stop_sar_sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_SOL_LIVE)
+    state["paused"] = True
+    save_state(STATE_SAR_SOL_LIVE, state)
+    await update.message.reply_text("⏸ SAR_SOL paused.")
+
+
+async def start_sar_sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_SOL_LIVE)
+    state["paused"] = False
+    save_state(STATE_SAR_SOL_LIVE, state)
+    await update.message.reply_text("▶️ SAR_SOL resumed.")
+
+
+async def close_sar_sol_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_SAR_SOL_LIVE)
+    await _manual_close(update, state, STATE_SAR_SOL_LIVE, "SAR_SOL", SOL_SAR_SYMBOL, TF_ENTRY, paper=False)
+
+
+# ── EMA BTC control (LIVE) ────────────────────────────────────────────────────
+
+async def stop_ema_btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_EMA_BTC_LIVE)
+    state["paused"] = True
+    save_state(STATE_EMA_BTC_LIVE, state)
+    await update.message.reply_text("⏸ EMA_BTC paused.")
+
+
+async def start_ema_btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_EMA_BTC_LIVE)
+    state["paused"] = False
+    save_state(STATE_EMA_BTC_LIVE, state)
+    await update.message.reply_text("▶️ EMA_BTC resumed.")
+
+
+async def close_ema_btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_EMA_BTC_LIVE)
+    await _manual_close(update, state, STATE_EMA_BTC_LIVE, "EMA_BTC", BTC_EMA_SYMBOL, EMA_TF, paper=False)
+
+
+# ── EMA ETH control (LIVE) ────────────────────────────────────────────────────
+
+async def stop_ema_eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_EMA_ETH_LIVE)
+    state["paused"] = True
+    save_state(STATE_EMA_ETH_LIVE, state)
+    await update.message.reply_text("⏸ EMA_ETH paused.")
+
+
+async def start_ema_eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_EMA_ETH_LIVE)
+    state["paused"] = False
+    save_state(STATE_EMA_ETH_LIVE, state)
+    await update.message.reply_text("▶️ EMA_ETH resumed.")
+
+
+async def close_ema_eth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state(STATE_EMA_ETH_LIVE)
+    await _manual_close(update, state, STATE_EMA_ETH_LIVE, "EMA_ETH", ETH_EMA_SYMBOL, EMA_TF, paper=False)
+
+
 async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not TRADE_LOG.exists():
         await update.message.reply_text(f"trades.csv not found\nPath: `{TRADE_LOG}`", parse_mode="Markdown")
@@ -1202,9 +1441,21 @@ def main() -> None:
     app.add_handler(CommandHandler("stop_sar_eth",  stop_sar_eth_command))
     app.add_handler(CommandHandler("start_sar_eth", start_sar_eth_command))
     app.add_handler(CommandHandler("close_sar_eth", close_sar_eth_command))
+    app.add_handler(CommandHandler("stop_sar_btc",  stop_sar_btc_command))
+    app.add_handler(CommandHandler("start_sar_btc", start_sar_btc_command))
+    app.add_handler(CommandHandler("close_sar_btc", close_sar_btc_command))
+    app.add_handler(CommandHandler("stop_sar_sol",  stop_sar_sol_command))
+    app.add_handler(CommandHandler("start_sar_sol", start_sar_sol_command))
+    app.add_handler(CommandHandler("close_sar_sol", close_sar_sol_command))
     app.add_handler(CommandHandler("stop_ema",      stop_ema_command))
     app.add_handler(CommandHandler("start_ema",     start_ema_command))
     app.add_handler(CommandHandler("close_ema",     close_ema_command))
+    app.add_handler(CommandHandler("stop_ema_btc",  stop_ema_btc_command))
+    app.add_handler(CommandHandler("start_ema_btc", start_ema_btc_command))
+    app.add_handler(CommandHandler("close_ema_btc", close_ema_btc_command))
+    app.add_handler(CommandHandler("stop_ema_eth",  stop_ema_eth_command))
+    app.add_handler(CommandHandler("start_ema_eth", start_ema_eth_command))
+    app.add_handler(CommandHandler("close_ema_eth", close_ema_eth_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     async def on_startup(application: Application) -> None:
@@ -1217,22 +1468,35 @@ def main() -> None:
             ("stop_sar_eth",  "⏸ Pause SAR ETH"),
             ("start_sar_eth", "▶️ Resume SAR ETH"),
             ("close_sar_eth", "🛑 Close SAR ETH manually"),
+            ("stop_sar_btc",  "⏸ Pause SAR BTC"),
+            ("start_sar_btc", "▶️ Resume SAR BTC"),
+            ("close_sar_btc", "🛑 Close SAR BTC manually"),
+            ("stop_sar_sol",  "⏸ Pause SAR SOL"),
+            ("start_sar_sol", "▶️ Resume SAR SOL"),
+            ("close_sar_sol", "🛑 Close SAR SOL manually"),
             ("stop_ema",      "⏸ Pause EMA SOL"),
             ("start_ema",     "▶️ Resume EMA SOL"),
             ("close_ema",     "🛑 Close EMA SOL manually"),
+            ("stop_ema_btc",  "⏸ Pause EMA BTC"),
+            ("start_ema_btc", "▶️ Resume EMA BTC"),
+            ("close_ema_btc", "🛑 Close EMA BTC manually"),
+            ("stop_ema_eth",  "⏸ Pause EMA ETH"),
+            ("start_ema_eth", "▶️ Resume EMA ETH"),
+            ("close_ema_eth", "🛑 Close EMA ETH manually"),
         ])
         asyncio.create_task(sar_loop(application))
         asyncio.create_task(sar_eth_loop(application))
+        asyncio.create_task(sar_btc_loop(application))
+        asyncio.create_task(sar_sol_loop(application))
         asyncio.create_task(ema_loop(application))
+        asyncio.create_task(ema_btc_loop(application))
+        asyncio.create_task(ema_eth_loop(application))
         asyncio.create_task(morning_report_loop(application))
-        for pcfg in PAPER_SAR_CONFIGS:
-            asyncio.create_task(paper_strategy_loop(application, sar_paper_tick, pcfg, LOOP_INTERVAL))
-        for pcfg in PAPER_EMA_CONFIGS:
-            asyncio.create_task(paper_strategy_loop(application, ema_paper_tick, pcfg, 30))
         log.info(
-            "Bot started. LIVE: SAR→%s | SAR_ETH→%s | EMA→%s | Paper loops: %d",
-            SYMBOL, ETH_SAR_SYMBOL, SOL_SYMBOL,
-            len(PAPER_SAR_CONFIGS) + len(PAPER_EMA_CONFIGS),
+            "Bot started. LIVE: SAR→%s | SAR_ETH→%s | SAR_BTC→%s | SAR_SOL→%s"
+            " | EMA→%s | EMA_BTC→%s | EMA_ETH→%s",
+            SYMBOL, ETH_SAR_SYMBOL, BTC_SAR_SYMBOL, SOL_SAR_SYMBOL,
+            SOL_SYMBOL, BTC_EMA_SYMBOL, ETH_EMA_SYMBOL,
         )
 
     app.post_init = on_startup
