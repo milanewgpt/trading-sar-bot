@@ -396,16 +396,6 @@ async def on_position_closed(
         "result": f"{result} {pnl:+.2f}$",
     })
 
-    mode_label = "📝 PAPER" if paper else "📋 LIVE"
-    result_emoji = "✅" if result == "WIN" else "❌"
-    sym_label = symbol.replace("-", "")
-    await notify(
-        app,
-        f"{mode_label} | {result_emoji} *{result}* — {direction} {sym_label}\n"
-        f"_Strategy: {strategy_name}_\n"
-        f"Entry: `{entry:.5f}`  Close: *{close_reason}*  PnL: `{pnl:+.2f}$`",
-    )
-
     state["state"] = MONITORING
     state["position"] = None
     state["signal"] = None
@@ -413,6 +403,17 @@ async def on_position_closed(
         state["cooldown_until"] = time.time() + sl_cooldown
         log.info("[%s] SL cooldown active for %dh", strategy_name, sl_cooldown // 3600)
     save_state(state_path, state)
+
+    mode_label = "📝 PAPER" if paper else "📋 LIVE"
+    result_emoji = "✅" if result == "WIN" else "❌"
+    sym_label = symbol.replace("-", "")
+    safe_name = strategy_name.replace("_", "\\_")
+    await notify(
+        app,
+        f"{mode_label} | {result_emoji} *{result}* — {direction} {sym_label}\n"
+        f"_Strategy: {safe_name}_\n"
+        f"Entry: `{entry:.5f}`  Close: *{close_reason}*  PnL: `{pnl:+.2f}$`",
+    )
 
 
 # ── Paper strategy loops (auto-approve, 6 instances: BTC/ETH/SOL × SAR/EMA) ──
