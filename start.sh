@@ -68,6 +68,36 @@ for row in to_add:
         changed = True
         print(f"migration: added {row['timestamp']} {row['strategy']}")
 
+# Fix EMA SOL SHORT June-03: TP was incorrectly logged as CLOSED/LOSS (fillHistory bug)
+# Actual close: BUY SHORT at 72.595, realizedPNL = +3.473
+for r in rows:
+    if (r.get("mode") == "LIVE"
+            and r.get("strategy") == "EMA"
+            and r.get("symbol") == "SOL-USDT"
+            and r.get("direction") == "SHORT"
+            and str(r.get("entry","")).startswith("76.")
+            and r.get("timestamp","").startswith("2026-06")
+            and "LOSS" in r.get("result","")):
+        r["close_reason"] = "TP"
+        r["result"] = "WIN +3.47$"
+        changed = True
+        print("migration: fixed EMA SOL SHORT Jun-03 CLOSED→TP WIN +3.47$")
+
+# Fix SAR DOGE SHORT June-03/04: TP was incorrectly logged as CLOSED/LOSS -0.84$
+# Actual close: BUY SHORT at 0.09145, realizedPNL = +1.677
+for r in rows:
+    if (r.get("mode") == "LIVE"
+            and r.get("strategy") == "SAR"
+            and r.get("symbol") == "DOGE-USDT"
+            and r.get("direction") == "SHORT"
+            and str(r.get("entry","")).startswith("0.0930")
+            and r.get("timestamp","").startswith("2026-06")
+            and "LOSS" in r.get("result","")):
+        r["close_reason"] = "TP"
+        r["result"] = "WIN +1.68$"
+        changed = True
+        print("migration: fixed SAR DOGE SHORT Jun-03 CLOSED→TP WIN +1.68$")
+
 # Deduplicate paper trades: for same strategy+symbol+direction+entry, keep only first occurrence
 seen = {}
 deduped = []
