@@ -307,30 +307,44 @@ async def is_position_closed(symbol: str) -> bool:
     return True
 
 
-async def get_live_close_reason(symbol: str, open_time: str) -> str:
-    """Query BingX order history to determine if position was closed by SL or TP.
-    Retries up to 3 times with delay — BingX history may lag by a few seconds."""
+async def get_live_close_reason(symbol: str, open_time: str, direction: str = "short") -> tuple[str, float | None]:
+    """Query BingX to determine close reason (TP/SL/CLOSED) and actual exit price.
+    Returns (reason, exit_price). Uses historyOrders first, fillHistory as fallback."""
     try:
         start_ts = int(datetime.fromisoformat(open_time).timestamp() * 1000)
-        await asyncio.sleep(3)  # wait for BingX history to update
+        await asyncio.sleep(3)
         for attempt in range(3):
             if attempt > 0:
                 await asyncio.sleep(4)
+            # Try historyOrders for explicit SL/TP order type
             orders = await bingx.get_history_orders(symbol, start_ts=start_ts, limit=20)
-            log.info("[close_reason] attempt=%d returned %d orders", attempt + 1, len(orders))
+            log.info("[close_reason] attempt=%d historyOrders=%d", attempt + 1, len(orders))
             for order in orders:
-                status = order.get("status", "")
-                otype = order.get("type", "")
-                log.info("[close_reason] type=%s status=%s", otype, status)
-                if status != "FILLED":
+                if order.get("status") != "FILLED":
                     continue
+                otype = order.get("type", "")
+                price = float(order.get("avgPrice") or order.get("price") or 0) or None
+                log.info("[close_reason] type=%s price=%s", otype, price)
                 if otype == "TAKE_PROFIT_MARKET":
-                    return "TP"
+                    return "TP", price
                 if otype == "STOP_MARKET":
-                    return "SL"
+                    return "SL", price
+            # Fallback: use fillHistory — determine reason from realizedPNL sign
+            close_side = "BUY" if direction == "short" else "SELL"
+            pos_side = "SHORT" if direction == "short" else "LONG"
+            fills = await bingx.get_fill_history(symbol, start_ts=start_ts, limit=50)
+            log.info("[close_reason] attempt=%d fillHistory=%d", attempt + 1, len(fills))
+            for fill in fills:
+                if fill.get("side") == close_side and fill.get("positionSide") == pos_side:
+                    pnl = float(fill.get("realizedPNL", 0) or 0)
+                    price = float(fill.get("price", 0) or 0) or None
+                    if pnl != 0:
+                        reason = "TP" if pnl > 0 else "SL"
+                        log.info("[close_reason] fill fallback: %s price=%s pnl=%s", reason, price, pnl)
+                        return reason, price
     except Exception as e:
         log.warning("get_live_close_reason failed: %s", e)
-    return "CLOSED"
+    return "CLOSED", None
 
 
 def paper_check_closed(position: dict, candles: list) -> str | None:
@@ -368,6 +382,7 @@ async def on_position_closed(
     symbol: str,
     sl_cooldown: int = 0,
     paper: bool = True,
+    actual_exit: float | None = None,
 ) -> None:
     pos = state.get("position", {})
     direction = pos.get("direction", "").upper()
@@ -375,13 +390,23 @@ async def on_position_closed(
     sl = float(pos.get("stop", 0))
     tp = float(pos.get("take", 0))
 
-    result = "WIN" if close_reason == "TP" else "LOSS"
     qty = float(pos.get("quantity", 1))
-    exit_price = tp if close_reason == "TP" else sl
-    if direction == "LONG":
-        pnl = round((exit_price - entry) * qty, 2)
+    if actual_exit is not None:
+        exit_price = actual_exit
+        if direction == "LONG":
+            pnl = round((exit_price - entry) * qty, 2)
+        else:
+            pnl = round((entry - exit_price) * qty, 2)
+        result = "WIN" if pnl > 0 else "LOSS"
+        if close_reason == "CLOSED":
+            close_reason = "TP" if result == "WIN" else "SL"
     else:
-        pnl = round((entry - exit_price) * qty, 2)
+        result = "WIN" if close_reason == "TP" else "LOSS"
+        exit_price = tp if close_reason == "TP" else sl
+        if direction == "LONG":
+            pnl = round((exit_price - entry) * qty, 2)
+        else:
+            pnl = round((entry - exit_price) * qty, 2)
 
     log.info("[%s][%s] closed via %s | %s entry=%.5f pnl=%+.2f",
              "PAPER" if paper else "LIVE", strategy_name, close_reason, direction, entry, pnl)
@@ -641,12 +666,12 @@ async def _sar_live_tick(
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
             if await is_position_closed(symbol):
-                close_reason = await get_live_close_reason(symbol, pos.get("open_time", ""))
+                close_reason, actual_exit = await get_live_close_reason(symbol, pos.get("open_time", ""), pos.get("direction", "short"))
             else:
-                close_reason = None
+                close_reason, actual_exit = None, None
 
         if close_reason:
-            await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=paper)
+            await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=paper, actual_exit=actual_exit)
 
 
 async def sar_tick(app: Application, state: dict) -> None:
@@ -754,12 +779,12 @@ async def ema_tick(app: Application, state: dict) -> None:
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
             if await is_position_closed(SOL_SYMBOL):
-                close_reason = await get_live_close_reason(SOL_SYMBOL, pos.get("open_time", ""))
+                close_reason, actual_exit = await get_live_close_reason(SOL_SYMBOL, pos.get("open_time", ""), pos.get("direction", "short"))
             else:
-                close_reason = None
+                close_reason, actual_exit = None, None
 
         if close_reason:
-            await on_position_closed(app, state, STATE_EMA, close_reason, "EMA", SOL_SYMBOL, paper=PAPER_MODE, sl_cooldown=SL_COOLDOWN)
+            await on_position_closed(app, state, STATE_EMA, close_reason, "EMA", SOL_SYMBOL, paper=PAPER_MODE, sl_cooldown=SL_COOLDOWN, actual_exit=actual_exit)
 
 
 async def _ema_live_tick(
@@ -818,12 +843,12 @@ async def _ema_live_tick(
     elif s == POSITION_OPEN:
         pos = state.get("position", {})
         if await is_position_closed(symbol):
-            close_reason = await get_live_close_reason(symbol, pos.get("open_time", ""))
+            close_reason, actual_exit = await get_live_close_reason(symbol, pos.get("open_time", ""), pos.get("direction", "short"))
         else:
-            close_reason = None
+            close_reason, actual_exit = None, None
 
         if close_reason:
-            await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=False, sl_cooldown=SL_COOLDOWN)
+            await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=False, sl_cooldown=SL_COOLDOWN, actual_exit=actual_exit)
 
 
 async def ema_btc_loop(app: Application) -> None:
@@ -959,13 +984,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── SAR + EMA ─────────────────────────────────────────────────────────────
     strategies = [
-        ("SAR 🔴 LIVE",     STATE_SAR,          SYMBOL,         TF_ENTRY),
-        ("SAR_ETH 🔴 LIVE", STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, TF_ENTRY),
-        ("SAR_BTC 🔴 LIVE", STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL, TF_ENTRY),
-        ("SAR_SOL 🔴 LIVE", STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL, TF_ENTRY),
-        ("EMA 🔴 LIVE",     STATE_EMA,          SOL_SYMBOL,     EMA_TF),
-        ("EMA_BTC 🔴 LIVE", STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL, EMA_TF),
-        ("EMA_ETH 🔴 LIVE", STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL, EMA_TF),
+        ("SAR 🔴 LIVE",      STATE_SAR,          SYMBOL,         TF_ENTRY),
+        ("SAR ETH 🔴 LIVE",  STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, TF_ENTRY),
+        ("SAR BTC 🔴 LIVE",  STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL, TF_ENTRY),
+        ("SAR SOL 🔴 LIVE",  STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL, TF_ENTRY),
+        ("EMA 🔴 LIVE",      STATE_EMA,          SOL_SYMBOL,     EMA_TF),
+        ("EMA BTC 🔴 LIVE",  STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL, EMA_TF),
+        ("EMA ETH 🔴 LIVE",  STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL, EMA_TF),
     ]
 
     for name, state_path, symbol, tf in strategies:
@@ -1047,7 +1072,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             total = s["wins"] + s["losses"]
             wr = round(s["wins"] / total * 100) if total else 0
             pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"{strat}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
+            lines.append(f"{strat.replace('_', ' ')}: {s['wins']}W / {s['losses']}L  WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
     else:
         lines.append("No trades yet")
 
@@ -1059,7 +1084,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             total = s["wins"] + s["losses"]
             wr = round(s["wins"] / total * 100) if total else 0
             pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"{strat}: {s['wins']}W/{s['losses']}L WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
+            lines.append(f"{strat.replace('_', ' ')}: {s['wins']}W/{s['losses']}L WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
     else:
         lines.append("No trades yet")
 

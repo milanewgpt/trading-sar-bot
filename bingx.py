@@ -81,6 +81,13 @@ class BingXClient:
         )
         return data.get("data", {}).get("orders", [])
 
+    async def get_fill_history(self, symbol: str, start_ts: int, limit: int = 50) -> list:
+        data = await self._get(
+            "/openApi/swap/v3/trade/fillHistory",
+            {"symbol": symbol, "startTime": start_ts, "limit": limit},
+        )
+        return data.get("data", []) or []
+
     # ── Trading ───────────────────────────────────────────────────────────────
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict:
