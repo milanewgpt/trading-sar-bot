@@ -120,4 +120,36 @@ if changed:
 PYEOF
 fi
 
+# Restore SAR_SOL position that was lost due to Markdown notification bug (2026-06-04)
+# Trade opened at 68.654 SHORT but state was reset to MONITORING before this fix.
+python3 - "$DATA_DIR/state_sar_sol_live.json" <<'PYEOF'
+import json, sys, os
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    sys.exit()
+
+with open(path) as f:
+    state = json.load(f)
+
+migrations = state.get("_migrations", [])
+if (state.get("state") == "monitoring"
+        and state.get("position") is None
+        and "sol_short_68654_jun04" not in migrations):
+    state["state"] = "position_open"
+    state["signal"] = None
+    state["_migrations"] = migrations + ["sol_short_68654_jun04"]
+    state["position"] = {
+        "direction": "short",
+        "entry": 68.654,
+        "stop": 69.6,
+        "take": 66.762,
+        "quantity": 1,
+        "open_time": "2026-06-04T12:10:00+00:00"
+    }
+    with open(path, "w") as f:
+        json.dump(state, f, indent=2)
+    print("migration: restored SAR_SOL SHORT 68.654 -> position_open")
+PYEOF
+
 exec python3 bot.py

@@ -934,14 +934,26 @@ async def _handle_approval(
         )
         try:
             position = await execute_trade(sig, symbol, paper=paper)
-            state["state"] = POSITION_OPEN
-            state["position"] = position
+        except Exception as e:
+            log.error("[%s] trade execution failed: %s", strategy_name, e, exc_info=True)
+            await context.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=f"❌ Failed to open {strategy_name} position: {e}",
+            )
+            state["state"] = MONITORING
             state["signal"] = None
             save_state(state_path, state)
+            return
 
-            mode_tag = "📝 PAPER" if paper else "✅ LIVE"
-            sym_label = symbol.replace("-", "")
-            safe_name = strategy_name.replace("_", " ")
+        state["state"] = POSITION_OPEN
+        state["position"] = position
+        state["signal"] = None
+        save_state(state_path, state)
+
+        mode_tag = "📝 PAPER" if paper else "✅ LIVE"
+        sym_label = symbol.replace("-", "")
+        safe_name = strategy_name.replace("_", " ")
+        try:
             await context.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=(
@@ -956,14 +968,7 @@ async def _handle_approval(
                 parse_mode="Markdown",
             )
         except Exception as e:
-            log.error("[%s] trade execution failed: %s", strategy_name, e, exc_info=True)
-            await context.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=f"❌ Failed to open {strategy_name} position: {e}",
-            )
-            state["state"] = MONITORING
-            state["signal"] = None
-            save_state(state_path, state)
+            log.warning("[%s] failed to send open notification: %s", strategy_name, e)
 
     elif action == "skip":
         await query.edit_message_text(f"⏭ {strategy_name} signal skipped.")
