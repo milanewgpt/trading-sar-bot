@@ -1332,6 +1332,7 @@ def _build_morning_report() -> str:
     """Build SAR/EMA daily stats block from trades.csv."""
     live  = read_trade_stats("LIVE")
     paper = read_trade_stats("PAPER")
+    has_active_paper = bool(PAPER_SAR_CONFIGS or PAPER_EMA_CONFIGS)
 
     lines = ["⚡ <b>SAR BOT — DAILY REPORT</b>"]
 
@@ -1347,49 +1348,68 @@ def _build_morning_report() -> str:
     else:
         lines.append("  нет сделок")
 
-    # PAPER section
-    lines.append("\n<b>PAPER trades</b>")
-    if paper:
-        for strat, s in sorted(paper.items()):
-            total = s["wins"] + s["losses"]
-            wr    = round(s["wins"] / total * 100) if total else 0
-            wr_e  = "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
-            pnl_e = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"  {strat}: {s['wins']}W/{s['losses']}L  WR {wr_e} {wr}%  {pnl_e} {s['pnl']:+.2f}$")
-    else:
-        lines.append("  нет сделок")
+    # PAPER section — only when paper mode is active
+    if has_active_paper:
+        lines.append("\n<b>PAPER trades</b>")
+        if paper:
+            for strat, s in sorted(paper.items()):
+                total = s["wins"] + s["losses"]
+                wr    = round(s["wins"] / total * 100) if total else 0
+                wr_e  = "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
+                pnl_e = "✅" if s["pnl"] >= 0 else "❌"
+                lines.append(f"  {strat}: {s['wins']}W/{s['losses']}L  WR {wr_e} {wr}%  {pnl_e} {s['pnl']:+.2f}$")
+        else:
+            lines.append("  нет сделок")
 
-    # Quick analysis
+    # Quick analysis — only LIVE stats (paper is historical archive)
     lines.append("\n<i>💡 Анализ:</i>")
-    all_stats = {**live, **paper}
-    if not all_stats:
+    if not live:
         lines.append("  нет данных — стратегии ещё не совершили сделок")
     else:
-        for strat, s in all_stats.items():
+        found = False
+        for strat, s in live.items():
             total = s["wins"] + s["losses"]
             if total == 0:
                 continue
             wr = s["wins"] / total * 100
             if s["pnl"] < -30:
                 lines.append(f"  • {strat}: убыток {s['pnl']:+.2f}$ — пересмотри параметры SL/TP")
+                found = True
             elif wr < 35 and total >= 10:
                 lines.append(f"  • {strat}: WR {wr:.0f}% — проверь условия входа")
+                found = True
             elif wr >= 55 and s["pnl"] > 0:
                 lines.append(f"  • {strat}: ✅ рабочий результат (WR {wr:.0f}%, PnL {s['pnl']:+.2f}$)")
+                found = True
+        if not found:
+            lines.append("  ничего критичного")
 
-    # SAR/EMA current state
-    sar_state = load_state(STATE_SAR)
-    ema_state = load_state(STATE_EMA)
-    sar_s = sar_state.get("state", "?")
-    ema_s = ema_state.get("state", "?")
+    # All 7 strategies status
     state_labels = {
         MONITORING: "👀 мониторинг",
-        PENDING_APPROVAL: "⏳ ждёт approve",
-        POSITION_OPEN: "📈 позиция открыта",
+        PENDING_APPROVAL: "⏳ апрув",
+        POSITION_OPEN: "📈 позиция",
     }
-    lines.append(
-        f"\nСтатус: SAR→{state_labels.get(sar_s, sar_s)}  |  EMA→{state_labels.get(ema_s, ema_s)}"
-    )
+    all_states = [
+        (STATE_SAR,          "SAR"),
+        (STATE_SAR_ETH_LIVE, "SAR_ETH"),
+        (STATE_SAR_BTC_LIVE, "SAR_BTC"),
+        (STATE_SAR_SOL_LIVE, "SAR_SOL"),
+        (STATE_EMA,          "EMA"),
+        (STATE_EMA_BTC_LIVE, "EMA_BTC"),
+        (STATE_EMA_ETH_LIVE, "EMA_ETH"),
+    ]
+    sar_parts = []
+    ema_parts = []
+    for state_path, name in all_states:
+        st = load_state(state_path).get("state", "?")
+        label = f"{name}→{state_labels.get(st, st)}"
+        if name.startswith("SAR"):
+            sar_parts.append(label)
+        else:
+            ema_parts.append(label)
+    lines.append(f"\nSAR: {' | '.join(sar_parts)}")
+    lines.append(f"EMA: {' | '.join(ema_parts)}")
 
     return "\n".join(lines)
 
