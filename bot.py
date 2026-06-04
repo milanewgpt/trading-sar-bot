@@ -437,7 +437,7 @@ async def on_position_closed(
     mode_label = "📝 PAPER" if paper else "📋 LIVE"
     result_emoji = "✅" if result == "WIN" else "❌"
     sym_label = symbol.replace("-", "")
-    safe_name = strategy_name.replace("_", "\\_")
+    safe_name = strategy_name.replace("_", " ")
     await notify(
         app,
         f"{mode_label} | {result_emoji} *{result}* — {direction} {sym_label}\n"
@@ -941,7 +941,7 @@ async def _handle_approval(
 
             mode_tag = "📝 PAPER" if paper else "✅ LIVE"
             sym_label = symbol.replace("-", "")
-            safe_name = strategy_name.replace("_", "\\_")
+            safe_name = strategy_name.replace("_", " ")
             await context.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=(
@@ -1146,7 +1146,7 @@ async def _manual_close(
 
     pnl_emoji = "✅" if pnl >= 0 else "❌"
     await update.message.reply_text(
-        f"🛑 *{strategy_name}* closed manually\n"
+        f"🛑 *{strategy_name.replace('_', ' ')}* closed manually\n"
         f"_{('PAPER' if paper else 'LIVE')}_ | {direction.upper()} {symbol.replace('-', '')}\n"
         f"Entry: `{entry:.5f}` → `{current_price:.5f}`\n"
         f"PnL: {pnl_emoji} `{pnl:+.2f}$`",
