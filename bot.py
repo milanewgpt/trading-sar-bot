@@ -1076,40 +1076,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         lines.append("No trades yet")
 
-    lines.append("\n━━━━━━━━━━━━━━━")
-    lines.append("📋 *PAPER stats*")
-    paper = read_trade_stats("PAPER")
-    if paper:
-        for strat, s in sorted(paper.items()):
-            total = s["wins"] + s["losses"]
-            wr = round(s["wins"] / total * 100) if total else 0
-            pnl_emoji = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"{strat.replace('_', ' ')}: {s['wins']}W/{s['losses']}L WR {wr}%  {pnl_emoji} {s['pnl']:+.2f}$")
-    else:
-        lines.append("No trades yet")
-
-    # Open paper positions
-    open_papers = []
-    for pcfg in PAPER_SAR_CONFIGS + PAPER_EMA_CONFIGS:
-        sp = paper_state_path(pcfg["name"])
-        pst = load_state(sp)
-        if pst.get("state") == POSITION_OPEN:
-            pos = pst.get("position", {})
-            d = pos.get("direction", "?").upper()
-            e = float(pos.get("entry", 0))
-            try:
-                tf = pcfg.get("tf_entry", "5m")
-                candles = await bingx.get_klines(pcfg["symbol"], tf, 2)
-                price = float(candles[-1]["close"])
-                upnl = round((price - e if d == "LONG" else e - price) / e * POSITION_SIZE, 2)
-                upnl_str = f"`{upnl:+.2f}$`"
-            except Exception:
-                upnl_str = "?"
-            open_papers.append(f"  {pcfg['name']}: {d} @ `{e:.5f}` uPnL {upnl_str}")
-    if open_papers:
-        lines.append("Open positions:")
-        lines.extend(open_papers)
-
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
