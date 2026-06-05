@@ -254,8 +254,13 @@ async def execute_trade(sig: dict, symbol: str, paper: bool = True) -> dict:
         quantity = round(POSITION_SIZE / entry, 6)
         log.info("[PAPER] Virtual %s %s @ %.5f qty=%.6f", sig["direction"], symbol, entry, quantity)
     else:
-        quantity = max(1, round(POSITION_SIZE / entry))
-        log.info("[LIVE] Opening %s %s @ %.5f qty=%d", sig["direction"], symbol, entry, quantity)
+        if entry >= 500:
+            # BTC/ETH: fractional qty, 3 decimal places (min 0.001)
+            quantity = max(0.001, round(POSITION_SIZE / entry, 3))
+        else:
+            # SOL/DOGE and other cheap assets: integer qty
+            quantity = max(1, round(POSITION_SIZE / entry))
+        log.info("[LIVE] Opening %s %s @ %.5f qty=%s", sig["direction"], symbol, entry, quantity)
         await bingx.set_leverage(symbol, LEVERAGE)
         order = await bingx.open_position(
             symbol=symbol,
