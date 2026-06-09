@@ -33,6 +33,7 @@ from config import (
     TELEGRAM_TOKEN,
     TF_CONFIRM,
     TF_ENTRY,
+    MAX_OPEN_POSITIONS,
 )
 from strategy import check_signal
 from strategy_ema import check_ema_signal, signal_details
@@ -309,6 +310,39 @@ async def is_position_closed(symbol: str) -> bool:
     for pos in positions:
         if abs(float(pos.get("positionAmt", 0))) > 0:
             return False
+    return True
+
+
+def can_open_position(symbol: str, direction: str) -> bool:
+    """Return False if opening would violate position rules:
+    - max 1 open/pending position per symbol
+    - max 1 open/pending position per direction (long/short)
+    """
+    # (state_path, symbol) for every live strategy
+    all_strategies = [
+        (STATE_SAR,          SYMBOL),
+        (STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL),
+        (STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL),
+        (STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL),
+        (STATE_EMA,          SOL_SYMBOL),
+        (STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL),
+        (STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL),
+    ]
+    direction_lc = direction.lower()
+    for path, strat_symbol in all_strategies:
+        try:
+            s = load_state(path)
+            if s.get("state") not in (POSITION_OPEN, PENDING_APPROVAL):
+                continue
+            # Same asset → block
+            if strat_symbol == symbol:
+                return False
+            # Same direction → block
+            pos = s.get("position") or s.get("signal") or {}
+            if (pos.get("direction") or "").lower() == direction_lc:
+                return False
+        except Exception:
+            pass
     return True
 
 
@@ -656,6 +690,10 @@ async def _sar_live_tick(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+        if not can_open_position(symbol, direction):
+            log.info("[%s] signal skipped: position limit (1 per asset, 1 per direction)", strategy_name)
+            return
+
         log.info("[%s] signal %s entry=%.6f sl=%.6f tp=%.6f", strategy_name, direction, entry, sar_val, take)
         msg_id = await send_signal(app, _sar_signal_text(sig, symbol), callback_prefix)
 
@@ -836,6 +874,10 @@ async def _ema_live_tick(
             "details": details,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+        if not can_open_position(symbol, direction):
+            log.info("[%s] signal skipped: position limit (1 per asset, 1 per direction)", strategy_name)
+            return
 
         log.info("[%s] signal %s entry=%.4f sl=%.4f tp=%.4f", strategy_name, direction, entry, stop, take)
         msg_id = await send_signal(app, _ema_signal_text(sig, symbol), callback_prefix)

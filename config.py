@@ -24,6 +24,8 @@ CANDLES_LIMIT = 200
 
 LOOP_INTERVAL = 10  # seconds between ticks
 
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "2"))
+
 # Paper trading: log signals without opening real orders
 PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
 
