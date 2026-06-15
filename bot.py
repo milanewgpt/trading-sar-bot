@@ -259,8 +259,8 @@ async def execute_trade(sig: dict, symbol: str, paper: bool = True) -> dict:
             # BTC/ETH: fractional qty, 3 decimal places (min 0.001)
             quantity = max(0.001, round(POSITION_SIZE / entry, 3))
         else:
-            # SOL/DOGE and other cheap assets: integer qty
-            quantity = max(1, round(POSITION_SIZE / entry))
+            # SOL/DOGE and other cheap assets: integer qty (floor to avoid over-exposure)
+            quantity = max(1, int(POSITION_SIZE / entry))
         log.info("[LIVE] Opening %s %s @ %.5f qty=%s", sig["direction"], symbol, entry, quantity)
         await bingx.set_leverage(symbol, LEVERAGE)
         order = await bingx.open_position(
@@ -704,14 +704,13 @@ async def _sar_live_tick(
 
     elif s == POSITION_OPEN:
         pos = state.get("position", {})
+        close_reason, actual_exit = None, None
         if paper:
             candles = await bingx.get_klines(symbol, TF_ENTRY, 10)
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
             if await is_position_closed(symbol):
                 close_reason, actual_exit = await get_live_close_reason(symbol, pos.get("open_time", ""), pos.get("direction", "short"))
-            else:
-                close_reason, actual_exit = None, None
 
         if close_reason:
             await on_position_closed(app, state, state_path, close_reason, strategy_name, symbol, paper=paper, actual_exit=actual_exit)
@@ -807,6 +806,10 @@ async def ema_tick(app: Application, state: dict) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+        if not can_open_position(SOL_SYMBOL, direction):
+            log.info("[EMA] signal skipped: position limit (1 per asset, 1 per direction)")
+            return
+
         log.info("[EMA] signal %s entry=%.4f sl=%.4f tp=%.4f", direction, entry, stop, take)
         msg_id = await send_signal(app, _ema_signal_text(sig), "ema")
 
@@ -817,14 +820,13 @@ async def ema_tick(app: Application, state: dict) -> None:
 
     elif s == POSITION_OPEN:
         pos = state.get("position", {})
+        close_reason, actual_exit = None, None
         if PAPER_MODE:
             candles = await bingx.get_klines(SOL_SYMBOL, EMA_TF, 10)
             close_reason = paper_check_closed(pos, candles[:-1])
         else:
             if await is_position_closed(SOL_SYMBOL):
                 close_reason, actual_exit = await get_live_close_reason(SOL_SYMBOL, pos.get("open_time", ""), pos.get("direction", "short"))
-            else:
-                close_reason, actual_exit = None, None
 
         if close_reason:
             await on_position_closed(app, state, STATE_EMA, close_reason, "EMA", SOL_SYMBOL, paper=PAPER_MODE, sl_cooldown=SL_COOLDOWN, actual_exit=actual_exit)
