@@ -1032,9 +1032,6 @@ async def _handle_approval(
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = ["📊 *Bot Status*\n"]
-    sar_mode = "📝 PAPER" if SAR_PAPER_MODE else "🔴 LIVE"
-    ema_mode = "📝 PAPER" if PAPER_MODE else "🔴 LIVE"
-    lines.append(f"SAR: {sar_mode}  |  EMA: {ema_mode}\n")
 
     # ── SAR + EMA ─────────────────────────────────────────────────────────────
     strategies = [
