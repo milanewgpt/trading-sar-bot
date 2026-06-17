@@ -1038,25 +1038,27 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ── SAR + EMA ─────────────────────────────────────────────────────────────
     strategies = [
-        ("SAR 🔴 LIVE",      STATE_SAR,          SYMBOL,         TF_ENTRY),
-        ("SAR ETH 🔴 LIVE",  STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, TF_ENTRY),
-        ("SAR BTC 🔴 LIVE",  STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL, TF_ENTRY),
-        ("SAR SOL 🔴 LIVE",  STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL, TF_ENTRY),
-        ("EMA 🔴 LIVE",      STATE_EMA,          SOL_SYMBOL,     EMA_TF),
-        ("EMA BTC 🔴 LIVE",  STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL, EMA_TF),
-        ("EMA ETH 🔴 LIVE",  STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL, EMA_TF),
+        ("SAR",     STATE_SAR,          SYMBOL,         TF_ENTRY),
+        ("SAR ETH", STATE_SAR_ETH_LIVE, ETH_SAR_SYMBOL, TF_ENTRY),
+        ("SAR BTC", STATE_SAR_BTC_LIVE, BTC_SAR_SYMBOL, TF_ENTRY),
+        ("SAR SOL", STATE_SAR_SOL_LIVE, SOL_SAR_SYMBOL, TF_ENTRY),
+        ("EMA",     STATE_EMA,          SOL_SYMBOL,     EMA_TF),
+        ("EMA BTC", STATE_EMA_BTC_LIVE, BTC_EMA_SYMBOL, EMA_TF),
+        ("EMA ETH", STATE_EMA_ETH_LIVE, ETH_EMA_SYMBOL, EMA_TF),
     ]
 
     for name, state_path, symbol, tf in strategies:
         state = load_state(state_path)
         s = state["state"]
         sym_label = symbol.replace("-", "")  # e.g. SOL-USDT → SOLUSDT
+        paused = state.get("paused", False)
+        mode_label = "🔴 Stop" if paused else "🟢 LIVE"
 
         lines.append(f"━━━━━━━━━━━━━━━")
-        lines.append(f"*{name}* — {sym_label} ({tf})")
+        lines.append(f"*{name} {mode_label}* — {sym_label} ({tf})")
 
         if s == MONITORING:
-            if state.get("paused"):
+            if paused:
                 lines.append("Status: ⏸ Paused")
             else:
                 lines.append("Status: 👀 Monitoring")
