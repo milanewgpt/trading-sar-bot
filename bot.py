@@ -1056,7 +1056,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.append(f"*{name}* — {sym_label} ({tf})")
 
         if s == MONITORING:
-            lines.append("Status: 👀 Monitoring")
+            if state.get("paused"):
+                lines.append("Status: ⏸ Paused")
+            else:
+                lines.append("Status: 👀 Monitoring")
 
         elif s == PENDING_APPROVAL:
             sig = state.get("signal", {})
