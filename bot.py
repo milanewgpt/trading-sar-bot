@@ -179,6 +179,42 @@ def read_trade_stats(mode_filter: str) -> dict:
     return stats
 
 
+def read_trade_stats_24h(mode_filter: str) -> dict:
+    """Returns {strategy: {wins, losses, pnl}} for last 24h filtered by mode."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    stats: dict = {}
+    if not TRADE_LOG.exists():
+        return stats
+    with open(TRADE_LOG, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("mode", "").upper() != mode_filter.upper():
+                continue
+            try:
+                ts = datetime.fromisoformat(row.get("timestamp", ""))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts < cutoff:
+                    continue
+            except Exception:
+                continue
+            strat = row.get("strategy", "?")
+            if strat not in stats:
+                stats[strat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            result = row.get("result", "")
+            try:
+                pnl = float(result.split()[-1].replace("$", ""))
+            except Exception:
+                pnl = 0.0
+            if "WIN" in result:
+                stats[strat]["wins"] += 1
+            else:
+                stats[strat]["losses"] += 1
+            stats[strat]["pnl"] += pnl
+    for s in stats:
+        stats[s]["pnl"] = round(stats[s]["pnl"], 2)
+    return stats
+
+
 # ── Telegram helpers ──────────────────────────────────────────────────────────
 
 def _sar_signal_text(sig: dict, symbol: str = None) -> str:
@@ -1377,61 +1413,83 @@ async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def _build_morning_report() -> str:
     """Build SAR/EMA daily stats block from trades.csv."""
-    live  = read_trade_stats("LIVE")
-    paper = read_trade_stats("PAPER")
+    live_all  = read_trade_stats("LIVE")
+    live_24h  = read_trade_stats_24h("LIVE")
+    paper_all = read_trade_stats("PAPER")
+    paper_24h = read_trade_stats_24h("PAPER")
     has_active_paper = bool(PAPER_SAR_CONFIGS or PAPER_EMA_CONFIGS)
 
-    lines = ["⚡ <b>SAR BOT — DAILY REPORT</b>"]
+    _wr_e = lambda wr: "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
 
-    # LIVE section
-    lines.append("\n<b>LIVE trades</b>")
-    if live:
-        for strat, s in sorted(live.items()):
-            total = s["wins"] + s["losses"]
-            wr    = round(s["wins"] / total * 100) if total else 0
-            wr_e  = "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
-            pnl_e = "✅" if s["pnl"] >= 0 else "❌"
-            lines.append(f"  {strat}: {s['wins']}W/{s['losses']}L  WR {wr_e} {wr}%  {pnl_e} {s['pnl']:+.2f}$")
-    else:
-        lines.append("  нет сделок")
-
-    # PAPER section — only when paper mode is active
-    if has_active_paper:
-        lines.append("\n<b>PAPER trades</b>")
-        if paper:
-            for strat, s in sorted(paper.items()):
-                total = s["wins"] + s["losses"]
-                wr    = round(s["wins"] / total * 100) if total else 0
-                wr_e  = "🟢" if wr >= 60 else ("🟡" if wr >= 40 else "🔴")
-                pnl_e = "✅" if s["pnl"] >= 0 else "❌"
-                lines.append(f"  {strat}: {s['wins']}W/{s['losses']}L  WR {wr_e} {wr}%  {pnl_e} {s['pnl']:+.2f}$")
+    def _fmt(name: str, mode: str, s_all: dict, s_24h: dict, state_path) -> list:
+        n_all = s_all["wins"] + s_all["losses"]
+        n_24h = s_24h["wins"] + s_24h["losses"]
+        wr_all = round(s_all["wins"] / n_all * 100) if n_all else 0
+        wr_24h = round(s_24h["wins"] / n_24h * 100) if n_24h else 0
+        pnl_e_all = "✅" if s_all["pnl"] >= 0 else "❌"
+        pnl_e_24h = "✅" if s_24h["pnl"] >= 0 else "❌"
+        is_open = load_state(state_path).get("state") == POSITION_OPEN
+        result = [f"\n<b>{name}</b> ({mode})"]
+        if n_24h > 0:
+            result.append(
+                f"24h: {n_24h} trades | {s_24h['wins']}W/{s_24h['losses']}L | "
+                f"WR {_wr_e(wr_24h)} {wr_24h}% | PnL {pnl_e_24h} {s_24h['pnl']:+.2f}$"
+            )
         else:
-            lines.append("  нет сделок")
+            result.append("24h: no trades")
+        if n_all > 0:
+            result.append(
+                f"total: {n_all} trades | {s_all['wins']}W/{s_all['losses']}L | "
+                f"WR {_wr_e(wr_all)} {wr_all}% | PnL {pnl_e_all} {s_all['pnl']:+.2f}$"
+            )
+        else:
+            result.append("total: no trades")
+        result.append("open: 1 position" if is_open else "open: no open positions")
+        return result
 
-    # Quick analysis — only LIVE stats (paper is historical archive)
-    lines.append("\n<i>💡 Анализ:</i>")
-    if not live:
-        lines.append("  нет данных — стратегии ещё не совершили сделок")
-    else:
-        found = False
-        for strat, s in live.items():
-            total = s["wins"] + s["losses"]
-            if total == 0:
-                continue
-            wr = s["wins"] / total * 100
-            if s["pnl"] < -30:
-                lines.append(f"  • {strat}: убыток {s['pnl']:+.2f}$ — пересмотри параметры SL/TP")
-                found = True
-            elif wr < 35 and total >= 10:
-                lines.append(f"  • {strat}: WR {wr:.0f}% — проверь условия входа")
-                found = True
-            elif wr >= 55 and s["pnl"] > 0:
-                lines.append(f"  • {strat}: ✅ рабочий результат (WR {wr:.0f}%, PnL {s['pnl']:+.2f}$)")
-                found = True
-        if not found:
-            lines.append("  ничего критичного")
+    lines = ["⚡ <b>SAR BOT — DAILY REPORT</b>", "\n<b>LIVE</b>"]
 
-    # All 7 strategies status
+    live_strategies = [
+        (STATE_SAR,          "SAR"),
+        (STATE_SAR_ETH_LIVE, "SAR_ETH"),
+        (STATE_SAR_BTC_LIVE, "SAR_BTC"),
+        (STATE_SAR_SOL_LIVE, "SAR_SOL"),
+        (STATE_EMA,          "EMA"),
+        (STATE_EMA_BTC_LIVE, "EMA_BTC"),
+        (STATE_EMA_ETH_LIVE, "EMA_ETH"),
+    ]
+    for state_path, name in live_strategies:
+        s_all = live_all.get(name, {"wins": 0, "losses": 0, "pnl": 0.0})
+        s_24h = live_24h.get(name, {"wins": 0, "losses": 0, "pnl": 0.0})
+        lines.extend(_fmt(name, "live", s_all, s_24h, state_path))
+
+    if has_active_paper and paper_all:
+        lines.append("\n<b>PAPER</b>")
+        for name in sorted(paper_all.keys()):
+            s_all = paper_all.get(name, {"wins": 0, "losses": 0, "pnl": 0.0})
+            s_24h = paper_24h.get(name, {"wins": 0, "losses": 0, "pnl": 0.0})
+            n_all = s_all["wins"] + s_all["losses"]
+            n_24h = s_24h["wins"] + s_24h["losses"]
+            wr_all = round(s_all["wins"] / n_all * 100) if n_all else 0
+            wr_24h = round(s_24h["wins"] / n_24h * 100) if n_24h else 0
+            pnl_e_all = "✅" if s_all["pnl"] >= 0 else "❌"
+            pnl_e_24h = "✅" if s_24h["pnl"] >= 0 else "❌"
+            lines.append(f"\n<b>{name}</b> (paper)")
+            if n_24h > 0:
+                lines.append(
+                    f"24h: {n_24h} trades | {s_24h['wins']}W/{s_24h['losses']}L | "
+                    f"WR {_wr_e(wr_24h)} {wr_24h}% | PnL {pnl_e_24h} {s_24h['pnl']:+.2f}$"
+                )
+            else:
+                lines.append("24h: no trades")
+            if n_all > 0:
+                lines.append(
+                    f"total: {n_all} trades | {s_all['wins']}W/{s_all['losses']}L | "
+                    f"WR {_wr_e(wr_all)} {wr_all}% | PnL {pnl_e_all} {s_all['pnl']:+.2f}$"
+                )
+            else:
+                lines.append("total: no trades")
+
     state_labels = {
         MONITORING: "👀 мониторинг",
         PENDING_APPROVAL: "⏳ апрув",
@@ -1446,15 +1504,11 @@ def _build_morning_report() -> str:
         (STATE_EMA_BTC_LIVE, "EMA_BTC"),
         (STATE_EMA_ETH_LIVE, "EMA_ETH"),
     ]
-    sar_parts = []
-    ema_parts = []
+    sar_parts, ema_parts = [], []
     for state_path, name in all_states:
         st = load_state(state_path).get("state", "?")
         label = f"{name}→{state_labels.get(st, st)}"
-        if name.startswith("SAR"):
-            sar_parts.append(label)
-        else:
-            ema_parts.append(label)
+        (sar_parts if name.startswith("SAR") else ema_parts).append(label)
     lines.append(f"\nSAR: {' | '.join(sar_parts)}")
     lines.append(f"EMA: {' | '.join(ema_parts)}")
 
